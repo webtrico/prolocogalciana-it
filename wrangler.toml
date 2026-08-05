@@ -1,0 +1,26 @@
+name = "emd-prolocogalciana-it"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+workers_dev = true
+
+[observability]
+enabled = true
+
+[assets]
+directory = "./static"
+binding = "ASSETS"
+not_found_handling = "404-page"
+html_handling = "auto-trailing-slash"
+run_worker_first = true
+
+[vars]
+COUNTRY = "IT"
+TOPLIST_EDGE = "https://toplist-edge.webtrico.com"
+
+[[routes]]
+pattern = "prolocogalciana.it"
+custom_domain = true
+
+[[routes]]
+pattern = "www.prolocogalciana.it"
+custom_domain = true
