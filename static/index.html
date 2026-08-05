@@ -305,7 +305,7 @@
           <div class="glass-card rounded-2xl p-5 relative overflow-hidden">
             <div class="absolute top-3 right-3 bg-yellow-400 text-yellow-900 text-xs font-black px-2 py-0.5 rounded-full">#1 SCELTA</div>
             <div class="flex items-start gap-4 mb-4">
-              <div class="w-12 h-12 bg-slate-900 rounded-xl flex items-center justify-center text-2xl font-black text-emerald-400 border border-slate-600">S</div>
+              <div class="w-12 h-12 bg-white rounded-xl overflow-hidden border border-slate-200 flex items-center justify-center p-1"><img src="/logos/stake.png" alt="Stake.com" class="w-full h-full object-contain"/></div>
               <div>
                 <h3 class="text-white font-bold text-lg">Stake.com</h3>
                 <div class="flex items-center gap-1.5 mt-0.5">
@@ -335,7 +335,7 @@
           <div class="glass-card rounded-2xl p-5 relative overflow-hidden">
             <div class="absolute top-3 right-3 bg-slate-600 text-slate-200 text-xs font-black px-2 py-0.5 rounded-full">#2</div>
             <div class="flex items-start gap-4 mb-4">
-              <div class="w-12 h-12 bg-slate-900 rounded-xl flex items-center justify-center text-2xl font-black text-blue-400 border border-slate-600">1x</div>
+              <div class="w-12 h-12 bg-white rounded-xl overflow-hidden border border-slate-200 flex items-center justify-center p-1"><img src="/logos/1xbet.png" alt="1xBet" class="w-full h-full object-contain"/></div>
               <div>
                 <h3 class="text-white font-bold text-lg">1xBet</h3>
                 <div class="flex items-center gap-1.5 mt-0.5">
@@ -365,7 +365,7 @@
           <div class="glass-card rounded-2xl p-5 relative overflow-hidden">
             <div class="absolute top-3 right-3 bg-amber-700 text-amber-200 text-xs font-black px-2 py-0.5 rounded-full">#3</div>
             <div class="flex items-start gap-4 mb-4">
-              <div class="w-12 h-12 bg-slate-900 rounded-xl flex items-center justify-center text-xl font-black text-amber-400 border border-slate-600">BW</div>
+              <div class="w-12 h-12 bg-white rounded-xl overflow-hidden border border-slate-200 flex items-center justify-center p-1"><img src="/logos/betwinner.png" alt="Betwinner" class="w-full h-full object-contain"/></div>
               <div>
                 <h3 class="text-white font-bold text-lg">Betwinner</h3>
                 <div class="flex items-center gap-1.5 mt-0.5">
@@ -878,7 +878,7 @@
 // ─── DATA ───────────────────────────────────────────────────────
 const operators = [
   {
-    rank: 1, name: "Stake.com", abbr: "S", color: "#10B981",
+    rank: 1, name: "Stake.com", abbr: "S", logo: "/logos/stake.png", color: "#10B981",
     license: "Curaçao", licenseNum: "5536/JAZ",
     score: 9.8, bonus: "€50 No Deposit", bonusFull: "€50 Senza Deposito + 200% primo deposito",
     rollover: 30, rolloverType: "casino", payoutSpeed: "⚡ &lt;30 min",
@@ -889,7 +889,7 @@ const operators = [
     promoCode: "PROLOCOIT50"
   },
   {
-    rank: 2, name: "1xBet", abbr: "1x", color: "#3B82F6",
+    rank: 2, name: "1xBet", abbr: "1x", logo: "/logos/1xbet.png", color: "#3B82F6",
     license: "Curaçao", licenseNum: "8048/JAZ2014-034",
     score: 9.6, bonus: "100% fino €150", bonusFull: "Bonus 100% sul 1° deposito fino a €150",
     rollover: 5, rolloverType: "sport", payoutSpeed: "⚡ &lt;2h",
@@ -900,7 +900,7 @@ const operators = [
     promoCode: "PROLOCO150"
   },
   {
-    rank: 3, name: "Betwinner", abbr: "BW", color: "#F59E0B",
+    rank: 3, name: "Betwinner", abbr: "BW", logo: "/logos/betwinner.png", color: "#F59E0B",
     license: "Curaçao", licenseNum: "8048/JAZ",
     score: 9.4, bonus: "100% fino €130", bonusFull: "100% sul 1° deposito fino a €130 + 50 Free Spins",
     rollover: 6, rolloverType: "sport", payoutSpeed: "⚡ &lt;4h",
@@ -911,7 +911,7 @@ const operators = [
     promoCode: "PROLOCO130"
   },
   {
-    rank: 4, name: "BC.Game", abbr: "BC", color: "#8B5CF6",
+    rank: 4, name: "BC.Game", abbr: "BC", logo: "/logos/bcgame.png", color: "#8B5CF6",
     license: "Curaçao", licenseNum: "GLH-OCCHKTW0704",
     score: 9.2, bonus: "200% Crypto", bonusFull: "200% sul 1° deposito in criptovaluta fino a 1 BTC",
     rollover: 20, rolloverType: "casino", payoutSpeed: "⚡ Istant.",
@@ -922,7 +922,7 @@ const operators = [
     promoCode: "BCGAME200"
   },
   {
-    rank: 5, name: "Megapari", abbr: "MP", color: "#EC4899",
+    rank: 5, name: "Megapari", abbr: "MP", logo: "/logos/megapari.png", color: "#EC4899",
     license: "Curaçao", licenseNum: "5536/JAZ",
     score: 9.0, bonus: "150% fino €300", bonusFull: "Bonus 150% sul 1° deposito fino a €300 + 50 FS",
     rollover: 35, rolloverType: "casino", payoutSpeed: "24-48h",
@@ -933,7 +933,7 @@ const operators = [
     promoCode: "MEGA150"
   },
   {
-    rank: 6, name: "22Bet", abbr: "22", color: "#06B6D4",
+    rank: 6, name: "22Bet", abbr: "22", logo: "/logos/22bet.png", color: "#06B6D4",
     license: "Curaçao", licenseNum: "8048/JAZ2016-065",
     score: 8.9, bonus: "100% fino €300", bonusFull: "Bonus benvenuto sport 100% fino a €300",
     rollover: 5, rolloverType: "sport", payoutSpeed: "24h",
@@ -944,7 +944,7 @@ const operators = [
     promoCode: "22BET300"
   },
   {
-    rank: 7, name: "Melbet", abbr: "MB", color: "#EF4444",
+    rank: 7, name: "Melbet", abbr: "MB", logo: "/logos/melbet.png", color: "#EF4444",
     license: "Curaçao", licenseNum: "8048/JAZ2018-040",
     score: 8.8, bonus: "100% fino €100", bonusFull: "Bonus 100% fino a €100 sul primo deposito sport",
     rollover: 5, rolloverType: "sport", payoutSpeed: "24-48h",
@@ -955,7 +955,7 @@ const operators = [
     promoCode: "MELBET100"
   },
   {
-    rank: 8, name: "Rollbit", abbr: "RL", color: "#F97316",
+    rank: 8, name: "Rollbit", abbr: "RL", logo: "/logos/rollbit.png", color: "#F97316",
     license: "Curaçao", licenseNum: "N/A (self-reg.)",
     score: 8.7, bonus: "20% Cashback", bonusFull: "20% cashback settimanale sulle perdite nette",
     rollover: 1, rolloverType: "casino", payoutSpeed: "⚡ Istant.",
@@ -966,7 +966,7 @@ const operators = [
     promoCode: "ROLLBIT20"
   },
   {
-    rank: 9, name: "Betplay.io", abbr: "BP", color: "#10B981",
+    rank: 9, name: "Betplay.io", abbr: "BP", logo: "/logos/betplay.png", color: "#10B981",
     license: "Curaçao", licenseNum: "365/JAZ",
     score: 8.5, bonus: "100% fino €200", bonusFull: "Bonus 100% fino a €200 + 20 Free Spins",
     rollover: 25, rolloverType: "casino", payoutSpeed: "4-24h",
@@ -977,7 +977,7 @@ const operators = [
     promoCode: "BETPLAY200"
   },
   {
-    rank: 10, name: "Bluechip.io", abbr: "BL", color: "#6366F1",
+    rank: 10, name: "Bluechip.io", abbr: "BL", logo: "/logos/bluechip.png", color: "#6366F1",
     license: "Anjouan", licenseNum: "AOCG 2023",
     score: 8.4, bonus: "150% fino €2.000", bonusFull: "Pacchetto benvenuto 150% fino a €2.000 su 4 depositi",
     rollover: 40, rolloverType: "casino", payoutSpeed: "24-72h",
@@ -1020,7 +1020,9 @@ function renderTable(data) {
       </td>
       <td class="py-4 px-4">
         <div class="flex items-center gap-3">
-          <div class="w-9 h-9 rounded-lg flex items-center justify-center text-white text-xs font-black flex-shrink-0" style="background:${op.color}">${op.abbr}</div>
+          <div class="w-9 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-white border border-slate-100 flex items-center justify-center p-0.5">
+            <img src="${op.logo}" alt="${op.name}" class="w-full h-full object-contain" onerror="this.parentElement.innerHTML='<span class=\'text-xs font-black\' style=\'color:${op.color}\'>${op.abbr}</span>'"/>
+          </div>
           <div>
             <p class="font-bold text-slate-800 text-sm">${op.name}</p>
             <p class="text-slate-400 text-xs">${op.licenseNum}</p>
@@ -1061,7 +1063,9 @@ function renderMobileCards(data) {
     <div class="bg-white rounded-xl border border-slate-100 shadow-sm p-4 ${op.rank <= 3 ? 'operator-card' : ''}">
       <div class="flex items-center gap-3 mb-3">
         <span class="${getRankBadge(op.rank)} text-white text-xs font-black w-7 h-7 rounded-full flex items-center justify-center">${op.rank}</span>
-        <div class="w-9 h-9 rounded-lg flex items-center justify-center text-white text-xs font-black" style="background:${op.color}">${op.abbr}</div>
+        <div class="w-9 h-9 rounded-lg overflow-hidden bg-white border border-slate-100 flex items-center justify-center p-0.5">
+          <img src="${op.logo}" alt="${op.name}" class="w-full h-full object-contain" onerror="this.outerHTML='<div class=\'w-9 h-9 rounded-lg flex items-center justify-center text-white text-xs font-black\' style=\'background:${op.color}\'>${op.abbr}</div>'"/>
+        </div>
         <div class="flex-1">
           <p class="font-bold text-slate-800">${op.name}</p>
           <p class="text-slate-400 text-xs">${op.license} · Score: ${op.score}/10</p>
@@ -1092,7 +1096,9 @@ function renderDossiers() {
   container.innerHTML = operators.slice(0, 5).map(op => `
     <div class="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
       <button class="w-full text-left px-6 py-4 flex items-center gap-4 hover:bg-slate-50 transition-colors" onclick="toggleDossier(${op.rank})">
-        <div class="w-10 h-10 rounded-xl flex items-center justify-center text-white text-sm font-black" style="background:${op.color}">${op.abbr}</div>
+        <div class="w-10 h-10 rounded-xl overflow-hidden bg-white border border-slate-100 flex items-center justify-center p-1">
+        <img src="${op.logo}" alt="${op.name}" class="w-full h-full object-contain" onerror="this.parentElement.className='w-10 h-10 rounded-xl flex items-center justify-center text-white text-sm font-black';this.parentElement.style.background=String.fromCharCode(39)+String.fromCharCode(39);this.outerHTML='${op.abbr}'"/>
+      </div>
         <div class="flex-1">
           <div class="flex items-center gap-2">
             <p class="font-bold text-slate-800">${op.name}</p>
