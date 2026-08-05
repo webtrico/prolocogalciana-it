@@ -19,9 +19,9 @@ TOPLIST_EDGE = "https://toplist-edge.webtrico.com"
 TOPLIST_ADMIN = "https://toplist-admin.webtrico.com"
 
 [[routes]]
-pattern = "prolocogalciana.it"
-custom_domain = true
+pattern = "prolocogalciana.it/*"
+zone_id = "cf09f430484d5e6e2b01c4e1a8105170"
 
 [[routes]]
-pattern = "www.prolocogalciana.it"
-custom_domain = true
+pattern = "www.prolocogalciana.it/*"
+zone_id = "cf09f430484d5e6e2b01c4e1a8105170"
