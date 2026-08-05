@@ -16,3 +16,12 @@ run_worker_first = true
 [vars]
 COUNTRY = "IT"
 TOPLIST_EDGE = "https://toplist-edge.webtrico.com"
+TOPLIST_ADMIN = "https://toplist-admin.webtrico.com"
+
+[[routes]]
+pattern = "prolocogalciana.it"
+custom_domain = true
+
+[[routes]]
+pattern = "www.prolocogalciana.it"
+custom_domain = true
