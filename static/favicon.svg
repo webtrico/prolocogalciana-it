@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#1E293B"/>
+    </linearGradient>
+  </defs>
+  <!-- Dark rounded square background -->
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <!-- Podium bars — top 3 ranking symbol -->
+  <!-- Bar 1 (middle, tallest — #1) in emerald -->
+  <rect x="26" y="20" width="12" height="28" rx="2.5" fill="#10B981"/>
+  <!-- Bar 2 (left — #2) lighter -->
+  <rect x="11" y="28" width="11" height="20" rx="2.5" fill="#34D399" opacity="0.75"/>
+  <!-- Bar 3 (right — #3) lighter still -->
+  <rect x="42" y="33" width="11" height="15" rx="2.5" fill="#34D399" opacity="0.45"/>
+  <!-- Bottom base line -->
+  <rect x="8" y="49" width="48" height="3" rx="1.5" fill="#334155"/>
+</svg>
