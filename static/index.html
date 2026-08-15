@@ -421,7 +421,16 @@
     <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
       <div>
         <h2 class="text-2xl font-black text-slate-900 tracking-tight">Classifica Completa — Top 10 Siti Non AAMS</h2>
-        <p class="text-slate-500 text-sm mt-1">Aggiornata manualmente ogni settimana. Dati verificati al 05/08/2026.</p>
+        <p class="text-slate-500 text-sm mt-1">Classifica live, aggiornata automaticamente.</p>
+      </div>
+    </div>
+
+    <div data-toplist="IT" class="mb-8"></div>
+
+    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
+      <div>
+        <h3 class="text-lg font-bold text-slate-800 tracking-tight">Confronta per Caratteristica</h3>
+        <p class="text-slate-500 text-sm mt-1">Filtra gli operatori per metodo di pagamento e requisiti bonus.</p>
       </div>
       <!-- Filters -->
       <div class="flex flex-wrap gap-2">
@@ -1048,7 +1057,7 @@ function renderTable(data) {
       </td>
       <td class="py-4 px-4 text-sm text-slate-600">${op.payoutSpeed}</td>
       <td class="py-4 px-4 text-center">
-        <a href="#" rel="nofollow noopener" target="_blank" class="cta-btn inline-block text-white text-xs font-bold px-4 py-2 rounded-lg whitespace-nowrap">ATTIVA</a>
+        <a href="/vai/${op.vaiSlug}" rel="nofollow noopener" target="_blank" class="cta-btn inline-block text-white text-xs font-bold px-4 py-2 rounded-lg whitespace-nowrap">ATTIVA</a>
       </td>
     </tr>
   `).join('');
@@ -1067,7 +1076,7 @@ function renderMobileCards(data) {
           <p class="font-bold text-slate-800">${op.name}</p>
           <p class="text-slate-400 text-xs">${op.license} · Score: ${op.score}/10</p>
         </div>
-        <a href="/${op.vaiSlug}" rel="nofollow noopener" target="_blank" class="cta-btn text-white text-xs font-bold px-3 py-1.5 rounded-lg">ATTIVA</a>
+        <a href="/vai/${op.vaiSlug}" rel="nofollow noopener" target="_blank" class="cta-btn text-white text-xs font-bold px-3 py-1.5 rounded-lg">ATTIVA</a>
       </div>
       <div class="grid grid-cols-3 gap-2 text-center mb-3">
         <div class="bg-slate-50 rounded-lg p-2">
@@ -1150,7 +1159,7 @@ function renderDossiers() {
               <input type="text" value="${op.promoCode}" readonly class="flex-1 bg-slate-50 border border-slate-200 text-emerald-600 font-mono text-sm font-bold px-3 py-2 rounded-lg" id="doss-code-${op.rank}"/>
               <button onclick="copyCode('doss-code-${op.rank}','doss-btn-${op.rank}')" id="doss-btn-${op.rank}" class="copy-btn bg-slate-200 hover:bg-emerald-500 hover:text-white text-slate-700 text-xs font-bold px-3 py-2 rounded-lg transition-colors">Copia</button>
             </div>
-            <a href="/${op.vaiSlug}" rel="nofollow noopener" target="_blank" class="cta-btn text-white font-bold px-5 py-2 rounded-lg text-sm">Vai al Sito →</a>
+            <a href="/vai/${op.vaiSlug}" rel="nofollow noopener" target="_blank" class="cta-btn text-white font-bold px-5 py-2 rounded-lg text-sm">Vai al Sito →</a>
           </div>
         </div>
       </div>
