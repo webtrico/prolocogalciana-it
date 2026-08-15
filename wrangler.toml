@@ -14,14 +14,22 @@ html_handling = "auto-trailing-slash"
 run_worker_first = true
 
 [vars]
+# Country for /go/:slug brand-resolution against toplist-edge.
+# Auto-detected from the domain at scaffold time. Override here if wrong.
 COUNTRY = "IT"
 TOPLIST_EDGE = "https://toplist-edge.webtrico.com"
 TOPLIST_ADMIN = "https://toplist-admin.webtrico.com"
+# Optional: comma-separated slugs to omit from this site's rendered toplist.
+# Leave commented out unless you have a partnership reason to filter brands.
+# TOPLIST_EXCLUDE_SLUGS = "competitor-a,competitor-b"
+# Optional: sister-site domain for hreflang on /brand/:slug pages.
+# Format: "FR:other-domain.fr" if THIS site is IT, or "IT:other.it" if THIS site is FR.
+# SISTER_SITE = "FR:casinoroyal.fr"
 
 [[routes]]
-pattern = "prolocogalciana.it/*"
-zone_id = "cf09f430484d5e6e2b01c4e1a8105170"
+pattern = "prolocogalciana.it"
+custom_domain = true
 
 [[routes]]
-pattern = "www.prolocogalciana.it/*"
-zone_id = "cf09f430484d5e6e2b01c4e1a8105170"
+pattern = "www.prolocogalciana.it"
+custom_domain = true
