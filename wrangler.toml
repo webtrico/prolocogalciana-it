@@ -27,9 +27,9 @@ TOPLIST_ADMIN = "https://toplist-admin.webtrico.com"
 # SISTER_SITE = "FR:casinoroyal.fr"
 
 [[routes]]
-pattern = "prolocogalciana.it"
-custom_domain = true
+pattern = "prolocogalciana.it/*"
+zone_name = "prolocogalciana.it"
 
 [[routes]]
-pattern = "www.prolocogalciana.it"
-custom_domain = true
+pattern = "www.prolocogalciana.it/*"
+zone_name = "prolocogalciana.it"
