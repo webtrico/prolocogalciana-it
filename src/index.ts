@@ -216,9 +216,29 @@ async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: Execut
   ctx.waitUntil(
     fetch(admin + '/beacon', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': request.headers.get('User-Agent') ?? '' },
+      // Never follow a redirect. The admin answers a beacon with 2xx or an
+      // error; anything else is a doorway, and following it turns the 302
+      // Cloudflare Access puts in front of /beacon into a cheerful 200 for a
+      // login page. That is precisely how six days of traffic reporting went
+      // missing while every hit was being thrown away.
+      redirect: 'manual',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': request.headers.get('User-Agent') ?? '',
+        // This hit was already filtered at the edge, against the visitor's own
+        // request, by isBotRequest above. The admin repeats the User-Agent half
+        // of that check and skips the Cloudflare-signal half, which on THIS
+        // request describes this worker in a datacentre rather than the person.
+        'X-Beacon-Edge': '1',
+      },
       body,
-    }).then(() => undefined).catch(() => undefined)
+    })
+      .then(function (res) {
+        if (!res.ok) console.warn('beacon forward rejected by ' + admin + ': HTTP ' + res.status)
+      })
+      .catch(function (e) {
+        console.warn('beacon forward failed: ' + ((e && e.message) ? e.message : String(e)))
+      })
   )
   return ok
 }
