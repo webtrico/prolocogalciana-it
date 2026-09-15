@@ -202,12 +202,26 @@ function beaconPath(host: string): string {
 async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: ExecutionContext): Promise<Response> {
   const ok = new Response(null, { status: 204 })
   if (isBotRequest(request)) return ok
-  let hit: { r?: unknown; s?: unknown } | null = null
+  let hit: { r?: unknown; s?: unknown; o?: unknown } | null = null
   try { hit = await request.json() } catch { hit = null }
   const admin = (env.TOPLIST_ADMIN ?? DEFAULT_TOPLIST_ADMIN).replace(/\/+$/, '')
   const body = JSON.stringify({
     domain: apexHost(url.hostname),
     referer: typeof hit?.r === 'string' ? hit.r.slice(0, 300) : '',
+    // o is the session's entry source, decided once by the page script on the
+    // first view and repeated on every view after it. The referer above is only
+    // this request's, which for page two of a session is our own page — so
+    // without this the traffic report can only ever see landing views as
+    // organic and calls the rest direct.
+    source: typeof hit?.o === 'string' ? hit.o.slice(0, 1).toLowerCase() : '',
+    device: typeof hit?.d === 'string' ? hit.d.slice(0, 1).toLowerCase() : '',
+    // The closing ping: the same session reporting what the visitor did before
+    // leaving. "final" tells the admin not to count a second page view.
+    // (No backticks in here: this comment lives inside the worker's own
+    // template literal, and one would end it.)
+    final: hit?.f === 1,
+    evidence: typeof hit?.e === 'number' ? hit.e : null,
+    dwell: typeof hit?.t === 'number' ? hit.t : null,
     // s is the page's answer to "is this the first view of a session". Sent as
     // a boolean so the admin never has to guess what a missing field meant.
     visit: hit?.s === 1,
@@ -251,7 +265,7 @@ async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: Execut
 function injectBeacon(response: Response, url: URL, env: { TOPLIST_ADMIN?: string }): Response {
   const ct = response.headers.get('Content-Type') ?? ''
   if (!ct.includes('text/html')) return response
-  const s = '<script>(function(){try{var v=1;try{if(sessionStorage.getItem("_s"))v=0;else sessionStorage.setItem("_s","1")}catch(e){v=document.referrer.indexOf(location.host)<0?1:0}var p=JSON.stringify({r:document.referrer||"",s:v});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([p],{type:"text/plain"}));}catch(e){}})();</script>'
+  const s = '<script>(function(){try{var SE="|google|bing|duckduckgo|yahoo|ecosia|qwant|startpage|brave|yandex|baidu|seznam|naver|mojeek|lycos|";function se(h){var a=String(h||"").toLowerCase().split(".");for(var i=0;i<a.length;i++){if(SE.indexOf("|"+a[i]+"|")>=0)return 1}return 0}var v=1,c="";try{c=sessionStorage.getItem("_o")||"";if(sessionStorage.getItem("_s"))v=0;else sessionStorage.setItem("_s","1")}catch(e){v=document.referrer.indexOf(location.host)<0?1:0}var dv="d";try{var ua=(navigator.userAgent||"").toLowerCase();var uad=navigator.userAgentData;dv=(uad&&uad.mobile===true)?"m":(ua.indexOf("ipad")>=0||(ua.indexOf("android")>=0&&ua.indexOf("mobi")<0))?"t":(ua.indexOf("mobi")>=0||ua.indexOf("iphone")>=0||ua.indexOf("android")>=0)?"m":"d"}catch(e5){dv="d"}if(!c){var r=document.referrer||"",rh="";try{rh=r?new URL(r).hostname:""}catch(e2){rh=""}var qs=(location.search||"").toLowerCase();var pd=qs.indexOf("gclid=")>=0||qs.indexOf("msclkid=")>=0||qs.indexOf("fbclid=")>=0||qs.indexOf("utm_medium=cpc")>=0;c=pd?"p":!rh?"d":(rh===location.hostname||rh==="www."+location.hostname||"www."+rh===location.hostname)?"i":se(rh)?"o":"r";try{sessionStorage.setItem("_o",c)}catch(e3){}}var sig=0,t0=Date.now();function mark(bt){return function(){sig=sig|bt}}var po={passive:true,capture:true};document.addEventListener("pointermove",mark(1),po);document.addEventListener("touchstart",mark(1),po);document.addEventListener("scroll",mark(2),po);document.addEventListener("wheel",mark(2),po);document.addEventListener("keydown",mark(4),po);function dwell(){return Math.min(3600,Math.round((Date.now()-t0)/1000))}function stamp(ev){try{var a=ev.target;a=(a&&a.closest)?a.closest("a"):null;if(!a)return;var h=a.getAttribute("href")||"";if(h.indexOf("/vai/")!==0&&h.indexOf("/aller/")!==0&&h.indexOf("/go/")!==0)return;if(h.indexOf("s=")>=0)return;var sg=sig|((ev&&ev.isTrusted)?8:0);a.setAttribute("href",h+(h.indexOf("?")>=0?"&":"?")+"s="+c+"&dev="+dv+"&e="+sg+"&t="+dwell());}catch(e4){}}document.addEventListener("click",stamp,true);document.addEventListener("auxclick",stamp,true);var p=JSON.stringify({r:document.referrer||"",s:v,o:c,d:dv});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([p],{type:"text/plain"}));var done=0;function bye(){if(done)return;done=1;try{var q=JSON.stringify({f:1,o:c,d:dv,e:sig,t:dwell()});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([q],{type:"text/plain"}))}catch(e6){}}document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden")bye()},true);if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("pagehide",bye,true);}catch(e){}})();</script>'
   return new HTMLRewriter().on('body', { element(el) { el.append(s, { html: true }) } }).transform(response)
 }
 
@@ -399,14 +413,18 @@ async function handleCloak(
   // Log the click without blocking the user's redirect. Failures are
   // swallowed — analytics gaps are acceptable; a slow redirect is not.
   //
-  // Bots are redirected exactly like anyone else, they just aren't logged.
-  // This check has to live HERE, not on the edge: logClick is a server-to-
-  // server fetch, so by the time it reaches /api/click the visitor's
-  // User-Agent and cf bot signals are gone and only ua_hash survives. This is
-  // the last point that still sees the real visitor request.
-  if (!isBotRequest(request)) {
-    ctx.waitUntil(logClick(edgeBase, request, url, country, slug))
-  }
+  // This is the last point that still sees the real visitor request: logClick
+  // is a server-to-server fetch, so by the time it reaches /api/click the
+  // User-Agent and the cf bot signals are gone and only ua_hash survives. The
+  // verdict therefore has to be made HERE — and, until now, was made here and
+  // then thrown away. Bots were simply not logged, so the only filter that
+  // reached the database was a 2-second timing rule, which counted 62% of a
+  // week's "human" clicks from agents that swept the whole ranking table.
+  //
+  // Now every click is logged and carries its verdict. Recording a bot as a bot
+  // beats not recording it: the raw count stays auditable, and "no clicks" and
+  // "all of them automated" stop looking identical.
+  ctx.waitUntil(logClick(edgeBase, request, url, country, slug, isBotRequest(request)))
 
   return new Response(null, {
     status: 302,
@@ -502,7 +520,8 @@ async function logClick(
   request: Request,
   url: URL,
   country: string,
-  slug: string
+  slug: string,
+  bot: boolean
 ): Promise<void> {
   // Hash the user-agent (8 char prefix) for unique-visitor estimates without
   // storing the raw UA. The hash is per-request — privacy-friendly enough
@@ -538,6 +557,23 @@ async function logClick(
         referer_host: refererHost,
         referer_path: refererPath,
         ua_hash: uaHash,
+        // The verdict from the request the visitor actually made. Without it
+        // the edge has only the timing rule.
+        bot,
+        // One letter, set by the page script on the link at click time, saying
+        // where this SESSION began. Absent means no script ran — which the
+        // edge records as unknown rather than guessing, and which is the state
+        // every crawler reading hrefs out of the HTML arrives in.
+        s: (url.searchParams.get('s') ?? '').slice(0, 1).toLowerCase() || undefined,
+        // m mobile, t tablet, d desktop. Classified in the browser because the
+        // User-Agent does not survive to the database — only a four-byte hash
+        // of it does, and a hash cannot be read back into a device.
+        dev: (url.searchParams.get('dev') ?? '').slice(0, 1).toLowerCase() || undefined,
+        // What the visitor did before clicking, as a bitmask, and how long they
+        // were on the page. Without Search Console this is the only signal left
+        // that costs a crawler anything to produce — see migration 0104.
+        e: url.searchParams.get('e') ?? undefined,
+        t: url.searchParams.get('t') ?? undefined,
       }),
     })
   } catch { /* never bubble click-log errors */ }
