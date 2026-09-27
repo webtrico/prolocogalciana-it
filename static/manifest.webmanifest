@@ -1,0 +1,16 @@
+{
+  "name": "prolocogalciana.it",
+  "short_name": "prolocogalciana",
+  "description": "prolocogalciana.it",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#0f172a",
+  "background_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
