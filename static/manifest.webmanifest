@@ -1,16 +1,17 @@
 {
-  "name": "prolocogalciana.it",
-  "short_name": "prolocogalciana",
-  "description": "prolocogalciana.it",
+  "name": "Siti Scommesse · Osservatorio Medea",
+  "short_name": "Osservatorio Medea",
+  "description": "Analisi indipendente dei siti scommesse non AAMS",
   "start_url": "/",
   "display": "standalone",
-  "theme_color": "#0f172a",
-  "background_color": "#0f172a",
+  "theme_color": "#0e2a2c",
+  "background_color": "#0e2a2c",
   "icons": [
     {
       "src": "/favicon.svg",
       "sizes": "any",
       "type": "image/svg+xml"
     }
-  ]
+  ],
+  "lang": "it"
 }

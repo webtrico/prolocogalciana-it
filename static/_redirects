@@ -1,5 +1,3 @@
-# _redirects — one rule per line: /old  /new  STATUS
+# _redirects - one rule per line: /old  /new  STATUS
 # Examples (remove # to activate):
 # /old-page  /new-page  301
-# /blog/*    /articles/:splat  301
-# /en/*      /:splat  302
