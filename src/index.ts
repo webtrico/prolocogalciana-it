@@ -201,10 +201,25 @@ function beaconPath(host: string): string {
 // exist. Always 204, always immediately: a page never waits on analytics.
 async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: ExecutionContext): Promise<Response> {
   const ok = new Response(null, { status: 204 })
-  if (isBotRequest(request)) return ok
-  let hit: { r?: unknown; s?: unknown; o?: unknown } | null = null
-  try { hit = await request.json() } catch { hit = null }
   const admin = (env.TOPLIST_ADMIN ?? DEFAULT_TOPLIST_ADMIN).replace(/\/+$/, '')
+  // A hit that is not a person is not dropped on the floor: the admin keeps a
+  // tally per reason, so the share the human filter removes can be read
+  // rather than guessed at. Only the domain and the reason travel.
+  const excluded = botReason(request)
+  if (excluded) {
+    ctx.waitUntil(fetch(admin + '/beacon', {
+      method: 'POST', redirect: 'manual',
+      headers: { 'Content-Type': 'application/json', 'X-Beacon-Edge': '1' },
+      body: JSON.stringify({ domain: apexHost(url.hostname), excluded: excluded }),
+    }).then(function () { return undefined }, function () { return undefined }))
+    return ok
+  }
+  let hit: { r?: unknown; s?: unknown; o?: unknown; p?: unknown } | null = null
+  try { hit = await request.json() } catch { hit = null }
+  // The page's own path, as it saw it; the query string is not part of the
+  // page. Absent on a site whose worker predates this.
+  const rawPath = typeof hit?.p === 'string' ? hit.p : ''
+  const path = rawPath.charAt(0) === '/' ? rawPath.split('?')[0].split('#')[0].slice(0, 200) : ''
   const body = JSON.stringify({
     domain: apexHost(url.hostname),
     referer: typeof hit?.r === 'string' ? hit.r.slice(0, 300) : '',
@@ -226,6 +241,7 @@ async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: Execut
     // a boolean so the admin never has to guess what a missing field meant.
     visit: hit?.s === 1,
     country: request.headers.get('CF-IPCountry') ?? '',
+    path: path,
   })
   ctx.waitUntil(
     fetch(admin + '/beacon', {
@@ -265,7 +281,7 @@ async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: Execut
 function injectBeacon(response: Response, url: URL, env: { TOPLIST_ADMIN?: string }): Response {
   const ct = response.headers.get('Content-Type') ?? ''
   if (!ct.includes('text/html')) return response
-  const s = '<script>(function(){try{var SE="|google|bing|duckduckgo|yahoo|ecosia|qwant|startpage|brave|yandex|baidu|seznam|naver|mojeek|lycos|";function se(h){var a=String(h||"").toLowerCase().split(".");for(var i=0;i<a.length;i++){if(SE.indexOf("|"+a[i]+"|")>=0)return 1}return 0}var v=1,c="";try{c=sessionStorage.getItem("_o")||"";if(sessionStorage.getItem("_s"))v=0;else sessionStorage.setItem("_s","1")}catch(e){v=document.referrer.indexOf(location.host)<0?1:0}var dv="d";try{var ua=(navigator.userAgent||"").toLowerCase();var uad=navigator.userAgentData;dv=(uad&&uad.mobile===true)?"m":(ua.indexOf("ipad")>=0||(ua.indexOf("android")>=0&&ua.indexOf("mobi")<0))?"t":(ua.indexOf("mobi")>=0||ua.indexOf("iphone")>=0||ua.indexOf("android")>=0)?"m":"d"}catch(e5){dv="d"}if(!c){var r=document.referrer||"",rh="";try{rh=r?new URL(r).hostname:""}catch(e2){rh=""}var qs=(location.search||"").toLowerCase();var pd=qs.indexOf("gclid=")>=0||qs.indexOf("msclkid=")>=0||qs.indexOf("fbclid=")>=0||qs.indexOf("utm_medium=cpc")>=0;c=pd?"p":!rh?"d":(rh===location.hostname||rh==="www."+location.hostname||"www."+rh===location.hostname)?"i":se(rh)?"o":"r";try{sessionStorage.setItem("_o",c)}catch(e3){}}var sig=0,t0=Date.now();function mark(bt){return function(){sig=sig|bt}}var po={passive:true,capture:true};document.addEventListener("pointermove",mark(1),po);document.addEventListener("touchstart",mark(1),po);document.addEventListener("scroll",mark(2),po);document.addEventListener("wheel",mark(2),po);document.addEventListener("keydown",mark(4),po);function dwell(){return Math.min(3600,Math.round((Date.now()-t0)/1000))}function stamp(ev){try{var a=ev.target;a=(a&&a.closest)?a.closest("a"):null;if(!a)return;var h=a.getAttribute("href")||"";if(h.indexOf("/vai/")!==0&&h.indexOf("/aller/")!==0&&h.indexOf("/go/")!==0)return;if(h.indexOf("s=")>=0)return;var sg=sig|((ev&&ev.isTrusted)?8:0);a.setAttribute("href",h+(h.indexOf("?")>=0?"&":"?")+"s="+c+"&dev="+dv+"&e="+sg+"&t="+dwell());}catch(e4){}}document.addEventListener("click",stamp,true);document.addEventListener("auxclick",stamp,true);var p=JSON.stringify({r:document.referrer||"",s:v,o:c,d:dv});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([p],{type:"text/plain"}));var done=0;function bye(){if(done)return;done=1;try{var q=JSON.stringify({f:1,o:c,d:dv,e:sig,t:dwell()});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([q],{type:"text/plain"}))}catch(e6){}}document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden")bye()},true);if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("pagehide",bye,true);}catch(e){}})();</script>'
+  const s = '<script>(function(){try{var SE="|google|bing|duckduckgo|yahoo|ecosia|qwant|startpage|brave|yandex|baidu|seznam|naver|mojeek|lycos|";function se(h){var a=String(h||"").toLowerCase().split(".");for(var i=0;i<a.length;i++){if(SE.indexOf("|"+a[i]+"|")>=0)return 1}return 0}var v=1,c="";try{c=sessionStorage.getItem("_o")||"";if(sessionStorage.getItem("_s"))v=0;else sessionStorage.setItem("_s","1")}catch(e){v=document.referrer.indexOf(location.host)<0?1:0}var dv="d";try{var ua=(navigator.userAgent||"").toLowerCase();var uad=navigator.userAgentData;dv=(uad&&uad.mobile===true)?"m":(ua.indexOf("ipad")>=0||(ua.indexOf("android")>=0&&ua.indexOf("mobi")<0))?"t":(ua.indexOf("mobi")>=0||ua.indexOf("iphone")>=0||ua.indexOf("android")>=0)?"m":"d"}catch(e5){dv="d"}if(!c){var r=document.referrer||"",rh="";try{rh=r?new URL(r).hostname:""}catch(e2){rh=""}var qs=(location.search||"").toLowerCase();var pd=qs.indexOf("gclid=")>=0||qs.indexOf("msclkid=")>=0||qs.indexOf("fbclid=")>=0||qs.indexOf("utm_medium=cpc")>=0;c=pd?"p":!rh?"d":(rh===location.hostname||rh==="www."+location.hostname||"www."+rh===location.hostname)?"i":se(rh)?"o":"r";try{sessionStorage.setItem("_o",c)}catch(e3){}}var sig=0,t0=Date.now();function mark(bt){return function(){sig=sig|bt}}var po={passive:true,capture:true};document.addEventListener("pointermove",mark(1),po);document.addEventListener("touchstart",mark(1),po);document.addEventListener("scroll",mark(2),po);document.addEventListener("wheel",mark(2),po);document.addEventListener("keydown",mark(4),po);function dwell(){return Math.min(3600,Math.round((Date.now()-t0)/1000))}function stamp(ev){try{var a=ev.target;a=(a&&a.closest)?a.closest("a"):null;if(!a)return;var h=a.getAttribute("href")||"";if(h.indexOf("/vai/")!==0&&h.indexOf("/aller/")!==0&&h.indexOf("/go/")!==0)return;if(h.indexOf("s=")>=0)return;var sg=sig|((ev&&ev.isTrusted)?8:0);a.setAttribute("href",h+(h.indexOf("?")>=0?"&":"?")+"s="+c+"&dev="+dv+"&e="+sg+"&t="+dwell());}catch(e4){}}document.addEventListener("click",stamp,true);document.addEventListener("auxclick",stamp,true);var p=JSON.stringify({r:document.referrer||"",s:v,o:c,d:dv,p:location.pathname});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([p],{type:"text/plain"}));var done=0;function bye(){if(done)return;done=1;try{var q=JSON.stringify({f:1,o:c,d:dv,e:sig,t:dwell(),p:location.pathname});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([q],{type:"text/plain"}))}catch(e6){}}document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden")bye()},true);if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("pagehide",bye,true);}catch(e){}})();</script>'
   return new HTMLRewriter().on('body', { element(el) { el.append(s, { html: true }) } }).transform(response)
 }
 
@@ -497,22 +513,43 @@ function appendTrackingParams(targetUrl: string, incoming: URLSearchParams, sour
 // false positive costs one uncounted click and never a lost referral.
 const BOT_UA = /(?:bot|crawl|spider|slurp|scrape|feedfetcher|mediapartners|facebookexternalhit|whatsapp|telegrambot|discordbot|slackbot|twitterbot|linkedinbot|embedly|pinterest|redditbot|applebot|bingpreview|yandex|baidu|duckduck|petalbot|semrush|ahrefs|mj12|dotbot|dataforseo|screaming frog|sitebulb|headless|phantomjs|puppeteer|playwright|selenium|python-requests|python-urllib|aiohttp|httpx|curl\/|wget\/|libwww|okhttp|axios\/|node-fetch|go-http-client|java\/|apache-httpclient|postmanruntime|insomnia|lighthouse|pagespeed|gtmetrix|uptimerobot|pingdom|statuscake|monitoring)/i
 
-function isBotRequest(request: Request): boolean {
+// Hosting networks. A browser running inside one is a script somebody is
+// driving, not a reader: headless Chrome on a cloud box fires the pixel like
+// any other browser and used to count. Google's own network is NOT here -
+// Google One VPN exits through it, and a person on that VPN is a person; the
+// Cloud Platform has its own number. Everything excluded is counted by reason
+// on the admin side, so this list can be read against what it removes.
+const DATACENTER_ASN = new Set([16509, 14618, 396982, 8075, 14061, 16276, 24940, 213230, 63949, 20473, 51167, 31898, 45102, 60781, 12876])
+
+// Why a request is not a person, or null when nothing says so. One verdict
+// for the beacon and the click counter both, so "human" means one thing on
+// this site. The order is cheapest and surest first.
+function botReason(request: Request): string | null {
   const cf = (request as unknown as { cf?: Record<string, unknown> }).cf
   if (cf) {
     const verified = cf['verifiedBotCategory']
-    if (typeof verified === 'string' && verified.trim() !== '') return true
+    if (typeof verified === 'string' && verified.trim() !== '') return 'verified_bot'
     const bm = cf['botManagement'] as { score?: unknown; verifiedBot?: unknown } | undefined
     if (bm) {
-      if (bm.verifiedBot === true) return true
+      if (bm.verifiedBot === true) return 'verified_bot'
       // score 0 means "not computed", not "maximally bot" — treating it as a
       // detection would drop every click on a plan without Bot Management.
       const score = typeof bm.score === 'number' ? bm.score : null
-      if (score !== null && score > 0 && score <= 30) return true
+      if (score !== null && score > 0 && score <= 30) return 'bot_score'
     }
+    const asn = typeof cf['asn'] === 'number' ? cf['asn'] : Number(cf['asn'])
+    if (Number.isFinite(asn) && DATACENTER_ASN.has(asn)) return 'datacenter'
   }
+  // A prefetch or a preview is the browser guessing, not the person reading.
+  const purpose = (request.headers.get('Sec-Purpose') || request.headers.get('Purpose') || '').toLowerCase()
+  if (purpose.indexOf('prefetch') >= 0 || purpose.indexOf('preview') >= 0) return 'prefetch'
   const ua = request.headers.get('User-Agent') ?? ''
-  return ua !== '' && BOT_UA.test(ua)
+  if (ua !== '' && BOT_UA.test(ua)) return 'bot_ua'
+  return null
+}
+
+function isBotRequest(request: Request): boolean {
+  return botReason(request) !== null
 }
 
 async function logClick(
