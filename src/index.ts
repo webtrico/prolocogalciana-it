@@ -148,6 +148,30 @@ async function handleLogoProxy(
   return new Response(res.body, { status: 200, headers })
 }
 
+// Where a page that no longer exists should send the visitor, or null for a
+// plain 404. A rescued or aged domain keeps its old inbound links this way:
+// NOT_FOUND_REDIRECT = "/" in wrangler.toml [vars] turns a miss into a 301 to
+// the homepage, so the links still count. This used to live as a hand edit in
+// fifteen workers, and a template resync overwrote every one of them; now it
+// is the template's, switched on per site by the setting.
+//
+// Only a page is redirected. A missing stylesheet, script, image, font, feed
+// or file stays a 404 — a broken stylesheet must not come back as a copy of
+// the homepage — and so do the well-known files and anything under /api/.
+// Only a GET or HEAD, and never the target itself.
+const NOT_FOUND_ASSET_RE = /\.(?:css|js|mjs|map|json|xml|txt|ico|png|jpe?g|gif|webp|avif|svg|woff2?|ttf|otf|eot|mp4|webm|mp3|ogg|wav|zip|gz|pdf)$/i
+function notFoundRedirectTarget(url: URL, setting: string | undefined, method: string): string | null {
+  const raw = (setting || '').trim()
+  if (!raw || (method !== 'GET' && method !== 'HEAD')) return null
+  const path = url.pathname
+  if (NOT_FOUND_ASSET_RE.test(path) || path.indexOf('/.well-known/') === 0 || path.indexOf('/api/') === 0) return null
+  let target: URL
+  try { target = new URL(raw, url.origin) } catch { return null }
+  const norm = function (p: string): string { return p.replace(/\/+$/, '') || '/' }
+  if (target.origin === url.origin && norm(target.pathname) === norm(path)) return null
+  return target.toString()
+}
+
 function withSecurityHeaders(response: Response, request?: Request): Response {
   const headers = new Headers(response.headers)
   for (const [k, v] of Object.entries(SECURITY_HEADERS)) headers.set(k, v)
@@ -214,8 +238,19 @@ async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: Execut
     }).then(function () { return undefined }, function () { return undefined }))
     return ok
   }
-  let hit: { r?: unknown; s?: unknown; o?: unknown; p?: unknown } | null = null
+  let hit: { r?: unknown; s?: unknown; o?: unknown; p?: unknown; x?: unknown } | null = null
   try { hit = await request.json() } catch { hit = null }
+  // An automated browser said so itself (navigator.webdriver): a crawler run
+  // through a real browser, which the edge signals alone do not catch. Not a
+  // view; tallied as excluded so the share is readable.
+  if (hit && hit.x === 'wd') {
+    ctx.waitUntil(fetch(admin + '/beacon', {
+      method: 'POST', redirect: 'manual',
+      headers: { 'Content-Type': 'application/json', 'X-Beacon-Edge': '1' },
+      body: JSON.stringify({ domain: apexHost(url.hostname), excluded: 'webdriver' }),
+    }).then(function () { return undefined }, function () { return undefined }))
+    return ok
+  }
   // The page's own path, as it saw it; the query string is not part of the
   // page. Absent on a site whose worker predates this.
   const rawPath = typeof hit?.p === 'string' ? hit.p : ''
@@ -281,10 +316,16 @@ async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: Execut
 function injectBeacon(response: Response, url: URL, env: { TOPLIST_ADMIN?: string }): Response {
   const ct = response.headers.get('Content-Type') ?? ''
   if (!ct.includes('text/html')) return response
-  const s = '<script>(function(){try{var SE="|google|bing|duckduckgo|yahoo|ecosia|qwant|startpage|brave|yandex|baidu|seznam|naver|mojeek|lycos|";function se(h){var a=String(h||"").toLowerCase().split(".");for(var i=0;i<a.length;i++){if(SE.indexOf("|"+a[i]+"|")>=0)return 1}return 0}var v=1,c="";try{c=sessionStorage.getItem("_o")||"";if(sessionStorage.getItem("_s"))v=0;else sessionStorage.setItem("_s","1")}catch(e){v=document.referrer.indexOf(location.host)<0?1:0}var dv="d";try{var ua=(navigator.userAgent||"").toLowerCase();var uad=navigator.userAgentData;dv=(uad&&uad.mobile===true)?"m":(ua.indexOf("ipad")>=0||(ua.indexOf("android")>=0&&ua.indexOf("mobi")<0))?"t":(ua.indexOf("mobi")>=0||ua.indexOf("iphone")>=0||ua.indexOf("android")>=0)?"m":"d"}catch(e5){dv="d"}if(!c){var r=document.referrer||"",rh="";try{rh=r?new URL(r).hostname:""}catch(e2){rh=""}var qs=(location.search||"").toLowerCase();var pd=qs.indexOf("gclid=")>=0||qs.indexOf("msclkid=")>=0||qs.indexOf("fbclid=")>=0||qs.indexOf("utm_medium=cpc")>=0;c=pd?"p":!rh?"d":(rh===location.hostname||rh==="www."+location.hostname||"www."+rh===location.hostname)?"i":se(rh)?"o":"r";try{sessionStorage.setItem("_o",c)}catch(e3){}}var sig=0,t0=Date.now();function mark(bt){return function(){sig=sig|bt}}var po={passive:true,capture:true};document.addEventListener("pointermove",mark(1),po);document.addEventListener("touchstart",mark(1),po);document.addEventListener("scroll",mark(2),po);document.addEventListener("wheel",mark(2),po);document.addEventListener("keydown",mark(4),po);function dwell(){return Math.min(3600,Math.round((Date.now()-t0)/1000))}function stamp(ev){try{var a=ev.target;a=(a&&a.closest)?a.closest("a"):null;if(!a)return;var h=a.getAttribute("href")||"";if(h.indexOf("/vai/")!==0&&h.indexOf("/aller/")!==0&&h.indexOf("/go/")!==0)return;if(h.indexOf("s=")>=0)return;var sg=sig|((ev&&ev.isTrusted)?8:0);a.setAttribute("href",h+(h.indexOf("?")>=0?"&":"?")+"s="+c+"&dev="+dv+"&e="+sg+"&t="+dwell());}catch(e4){}}document.addEventListener("click",stamp,true);document.addEventListener("auxclick",stamp,true);var p=JSON.stringify({r:document.referrer||"",s:v,o:c,d:dv,p:location.pathname});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([p],{type:"text/plain"}));var done=0;function bye(){if(done)return;done=1;try{var q=JSON.stringify({f:1,o:c,d:dv,e:sig,t:dwell(),p:location.pathname});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([q],{type:"text/plain"}))}catch(e6){}}document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden")bye()},true);if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("pagehide",bye,true);}catch(e){}})();</script>'
+  const s = '<script>(function(){try{var SE="|google|bing|duckduckgo|yahoo|ecosia|qwant|startpage|brave|yandex|baidu|seznam|naver|mojeek|lycos|";function se(h){var a=String(h||"").toLowerCase().split(".");for(var i=0;i<a.length;i++){if(SE.indexOf("|"+a[i]+"|")>=0)return 1}return 0}var v=1,c="";try{c=sessionStorage.getItem("_o")||"";if(sessionStorage.getItem("_s"))v=0;else sessionStorage.setItem("_s","1")}catch(e){v=document.referrer.indexOf(location.host)<0?1:0}var dv="d";try{var ua=(navigator.userAgent||"").toLowerCase();var uad=navigator.userAgentData;dv=(uad&&uad.mobile===true)?"m":(ua.indexOf("ipad")>=0||(ua.indexOf("android")>=0&&ua.indexOf("mobi")<0))?"t":(ua.indexOf("mobi")>=0||ua.indexOf("iphone")>=0||ua.indexOf("android")>=0)?"m":"d"}catch(e5){dv="d"}if(!c){var r=document.referrer||"",rh="";try{rh=r?new URL(r).hostname:""}catch(e2){rh=""}var qs=(location.search||"").toLowerCase();var pd=qs.indexOf("gclid=")>=0||qs.indexOf("msclkid=")>=0||qs.indexOf("fbclid=")>=0||qs.indexOf("utm_medium=cpc")>=0;c=pd?"p":!rh?"d":(rh===location.hostname||rh==="www."+location.hostname||"www."+rh===location.hostname)?"i":se(rh)?"o":"r";try{sessionStorage.setItem("_o",c)}catch(e3){}}var sig=0,t0=Date.now();function mark(bt){return function(){sig=sig|bt}}var po={passive:true,capture:true};document.addEventListener("pointermove",mark(1),po);document.addEventListener("touchstart",mark(1),po);document.addEventListener("scroll",mark(2),po);document.addEventListener("wheel",mark(2),po);document.addEventListener("keydown",mark(4),po);function dwell(){return Math.min(3600,Math.round((Date.now()-t0)/1000))}function stamp(ev){try{var a=ev.target;a=(a&&a.closest)?a.closest("a"):null;if(!a)return;var h=a.getAttribute("href")||"";if(h.indexOf("/vai/")!==0&&h.indexOf("/aller/")!==0&&h.indexOf("/go/")!==0)return;if(h.indexOf("s=")>=0)return;var sg=sig|((ev&&ev.isTrusted)?8:0);a.setAttribute("href",h+(h.indexOf("?")>=0?"&":"?")+"s="+c+"&dev="+dv+"&e="+sg+"&t="+dwell());}catch(e4){}}document.addEventListener("click",stamp,true);document.addEventListener("auxclick",stamp,true);if(navigator.webdriver){navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([JSON.stringify({x:"wd"})],{type:"text/plain"}));return}var p=JSON.stringify({r:document.referrer||"",s:v,o:c,d:dv,p:location.pathname});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([p],{type:"text/plain"}));var done=0;function bye(){if(done)return;done=1;try{var q=JSON.stringify({f:1,o:c,d:dv,e:sig,t:dwell(),p:location.pathname});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([q],{type:"text/plain"}))}catch(e6){}}document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden")bye()},true);if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("pagehide",bye,true);}catch(e){}try{var bars=document.querySelectorAll("a[class*=-sbar]");if(bars.length&&matchMedia("(max-width:640px)").matches){var pin=function(){for(var i=0;i<bars.length;i++){var bar=bars[i],w=bar.parentElement,rc=w.getBoundingClientRect(),on=rc.top<innerHeight-120&&rc.bottom>innerHeight+40;bar.style.position=on?"fixed":"";bar.style.left=on?"16px":"";bar.style.right=on?"16px":"";bar.style.bottom=on?"10px":"";bar.style.zIndex=on?"99":""}};addEventListener("scroll",pin,{passive:true});addEventListener("resize",pin,{passive:true});addEventListener("load",pin);pin();setTimeout(pin,800);setTimeout(pin,2500)}}catch(e7){}})();</script>'
   return new HTMLRewriter().on('body', { element(el) { el.append(s, { html: true }) } }).transform(response)
 }
 
+// The toplist's phone bar (toplist-edge stickyBar) is position:sticky at the
+// end of the widget, which a host theme defeats the moment it clips its main
+// column (teatrokappao.it: main with overflow hidden). The tail of the
+// beacon script above pins the bar as position:fixed while the widget spans
+// past the bottom of a phone screen, and lets it go the moment the widget's
+// own end is on screen, so the bar never outlives the list.
 // Inject the server-rendered toplist into any element with a [data-toplist]
 // attribute. The element's existing contents are REPLACED with the fragment.
 // Optional [data-toplist="IT|FR"] overrides the country detection.
@@ -309,13 +350,17 @@ async function injectToplist(
   // multiple [data-toplist] elements on one page only fetch once per
   // unique combo.
   const cache = new Map<string, string>()
-  async function fetchFragment(country: string, theme: string, exclude: string, limit: string): Promise<string> {
-    const key = country + '|' + theme + '|' + exclude + '|' + limit
+  async function fetchFragment(country: string, theme: string, exclude: string, limit: string, host: string): Promise<string> {
+    const key = country + '|' + theme + '|' + exclude + '|' + limit + '|' + host
     const hit = cache.get(key)
     if (hit !== undefined) return hit
     let renderUrl = `${edgeBase}/render/${country}?domain=${encodeURIComponent(hostname)}&theme=${theme}`
     if (exclude) renderUrl += `&exclude=${encodeURIComponent(exclude)}`
     if (limit) renderUrl += `&limit=${encodeURIComponent(limit)}`
+    // The page's own colours and type, so the list renders as part of the
+    // article: data-toplist-bg="#0f1115" data-toplist-accent="#e0b25a"
+    // data-toplist-font="host". Already validated to a hex / the word host.
+    if (host) renderUrl += host
     try {
       const r = await fetch(renderUrl, { cf: { cacheTtl: 300, cacheEverything: true } })
       if (!r.ok) { cache.set(key, ''); return '' }
@@ -339,6 +384,11 @@ async function injectToplist(
   //   4. domain heuristic (FRENCH_DOMAIN_HINT regex)
   // We capture (2) here in a closure so the placeholder handler can read it.
   let pageLang: 'IT' | 'FR' | null = null
+  // The page's own colour, when it states one: <meta name="theme-color"> is
+  // what most themes already ship, and it is the background the list should
+  // sit on. Read in the head, used by the placeholder further down, and only
+  // when the placeholder itself says nothing (data-toplist-bg wins).
+  let pageColor = ''
 
   return new HTMLRewriter()
     .on('html', {
@@ -348,6 +398,12 @@ async function injectToplist(
         else if (lang === 'fr') pageLang = 'FR'
       },
     })
+    .on('meta[name="theme-color"]', {
+      element(el) {
+        const v = (el.getAttribute('content') ?? '').trim()
+        if (/^#?[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(v)) pageColor = v.replace(/^#/, '')
+      },
+    })
     .on('[data-toplist]', {
       async element(el) {
         const explicit = (el.getAttribute('data-toplist') ?? '').toUpperCase()
@@ -355,14 +411,31 @@ async function injectToplist(
         if (explicit === 'IT' || explicit === 'FR') country = explicit
         else if (pageLang) country = pageLang
         else country = detectCountry(env, hostname)
-        const theme = el.getAttribute('data-toplist-theme') === 'light' ? 'light' : 'dark'
+        const themeAttr = (el.getAttribute('data-toplist-theme') ?? '').trim().toLowerCase()
+        const theme = themeAttr === 'light' ? 'light' : 'dark'
         const pageExclude = el.getAttribute('data-toplist-exclude')
         const exclude = (pageExclude ?? defaultExclude).trim()
         // Optional cap: data-toplist-limit="5" renders top 5 instead of 10.
         // Validated to a 1..10 integer; ignored if invalid or unset.
         const rawLimit = el.getAttribute('data-toplist-limit') ?? ''
         const limit = /^([1-9]|10)$/.test(rawLimit) ? rawLimit : ''
-        const fragment = await fetchFragment(country, theme, exclude, limit)
+        // Native look: the page's background and accent colours (hex) and
+        // whether the list should use the page's font. Anything else is
+        // dropped here, so a typo never reaches the renderer.
+        const hex = (v: string | null) => (v && /^#?[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(v.trim()) ? v.trim().replace(/^#/, '') : '')
+        // theme-color is the browser-chrome colour, and on a light page it is
+        // often the brand's dark header (balbuzie-news.it: a cream page, a
+        // maroon theme-color). So the meta stands in for the page background
+        // ONLY when it agrees with what the placeholder says the page is: a
+        // dark colour on a page declared light would turn the list dark on
+        // cream, worse than before. An explicit data-toplist-bg always wins.
+        const lum = (h: string) => { const v = h.length === 3 ? h.split('').map((c) => c + c).join('') : h; const [r, g, b] = [0, 2, 4].map((i) => parseInt(v.slice(i, i + 2), 16) / 255); return 0.2126 * r + 0.7152 * g + 0.0722 * b }
+        const metaFits = !!pageColor && (themeAttr === '' || (themeAttr === 'light') === (lum(pageColor) > 0.4))
+        const hostBg = hex(el.getAttribute('data-toplist-bg')) || (metaFits ? pageColor : '')
+        const hostAccent = hex(el.getAttribute('data-toplist-accent'))
+        const hostFont = (el.getAttribute('data-toplist-font') ?? '').trim().toLowerCase() === 'host'
+        const host = (hostBg ? '&bg=' + hostBg : '') + (hostAccent ? '&accent=' + hostAccent : '') + (hostFont ? '&font=host' : '')
+        const fragment = await fetchFragment(country, theme, exclude, limit, host)
         if (fragment) {
           el.setInnerContent(fragment, { html: true })
         }
@@ -631,6 +704,7 @@ interface Env {
   SUBDOMAIN_SLUG?: string         // optional inner-page slug for it-it hreflang (e.g. it-it)
   REDIRECT_HOSTS?: string         // optional comma-separated hosts that 301 to SUBDOMAIN_HOST
   ROBOTS_TAG?: string             // optional site-wide robots directive, replaces per-page tags
+  NOT_FOUND_REDIRECT?: string     // optional: where a page that no longer exists goes, with a 301 (e.g. "/"); absent = 404
 }
 
 // When SUBDOMAIN_HOST + SUBDOMAIN_SLUG are set, strip existing canonical/hreflang from HTML
@@ -793,6 +867,17 @@ export default {
       // 301, and a rescued redirect must not be turned into a tombstone.
       if (isRetiredPath && assetResponse.status === 404) {
         return handleRetiredPage(url, env)
+      }
+      // A page that no longer exists, on a site that asked for its old links
+      // to keep counting: 301 to NOT_FOUND_REDIRECT. See notFoundRedirectTarget.
+      if (assetResponse.status === 404) {
+        const sendTo = notFoundRedirectTarget(url, env.NOT_FOUND_REDIRECT, request.method)
+        if (sendTo) {
+          return withSecurityHeaders(new Response(null, {
+            status: 301,
+            headers: { Location: sendTo, 'Cache-Control': 'public, max-age=3600' },
+          }))
+        }
       }
       const withToplist = await injectToplist(assetResponse, request, env)
       const withMirror = (env.SUBDOMAIN_HOST && env.SUBDOMAIN_SLUG)
