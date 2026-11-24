@@ -1497,6 +1497,103 @@ async function generatedPage(url: URL, env: Env): Promise<Response | null> {
   return renderMarkdownPage(url, env)
 }
 
+// ── Image dimensions ──────────────────────────────────────────────────────
+// The dimensions rule reads width and height attributes only, and a page
+// without them shifts as its images arrive. For a same-origin image that
+// lacks them the worker reads the size out of the file's own header (PNG,
+// GIF, JPEG, WebP, SVG) through the assets binding, once, and keeps it in the
+// edge cache for a week; a file it cannot read is remembered for a day so a
+// broken image never costs a fetch per page view.
+const IMG_DIMS_MAX = 40
+const BE16 = (b: Uint8Array, i: number) => (b[i] << 8) | b[i + 1]
+const LE16 = (b: Uint8Array, i: number) => b[i] | (b[i + 1] << 8)
+function imageSize(bytes: Uint8Array, contentType: string): [number, number] | null {
+  const b = bytes
+  if (b.length >= 24 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) {
+    return [(b[16] << 24 | b[17] << 16 | b[18] << 8 | b[19]) >>> 0, (b[20] << 24 | b[21] << 16 | b[22] << 8 | b[23]) >>> 0]
+  }
+  if (b.length >= 10 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return [LE16(b, 6), LE16(b, 8)]
+  if (b.length >= 30 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) {
+    const chunk = String.fromCharCode(b[12], b[13], b[14], b[15])
+    if (chunk === 'VP8 ') return [LE16(b, 26) & 0x3fff, LE16(b, 28) & 0x3fff]
+    if (chunk === 'VP8L') return [(b[21] | ((b[22] & 0x3f) << 8)) + 1, ((b[22] >> 6) | (b[23] << 2) | ((b[24] & 0x0f) << 10)) + 1]
+    if (chunk === 'VP8X') return [(b[24] | (b[25] << 8) | (b[26] << 16)) + 1, (b[27] | (b[28] << 8) | (b[29] << 16)) + 1]
+    return null
+  }
+  if (b.length >= 4 && b[0] === 0xff && b[1] === 0xd8) {
+    let i = 2
+    while (i + 9 < b.length) {
+      if (b[i] !== 0xff) { i++; continue }
+      const m = b[i + 1]
+      if (m === 0xff) { i++; continue }
+      if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) return [BE16(b, i + 7), BE16(b, i + 5)]
+      if (m === 0xd8 || m === 0x01 || (m >= 0xd0 && m <= 0xd7)) { i += 2; continue }
+      i += 2 + BE16(b, i + 2)
+    }
+    return null
+  }
+  if (/svg/i.test(contentType) || /^\s*(?:<\?xml[^>]*>\s*)?(?:<!--[\s\S]*?-->\s*)*<svg/i.test(new TextDecoder().decode(b.slice(0, 2048)))) {
+    const head = new TextDecoder().decode(b.slice(0, 4096))
+    const tag = /<svg\b[^>]*>/i.exec(head)?.[0] ?? ''
+    const a = parseAttrs(tag)
+    const num = (v: string | undefined) => { const n = parseFloat(String(v ?? '')); return n > 0 && /^\s*\d*\.?\d+(?:px)?\s*$/i.test(String(v ?? '')) ? Math.round(n) : 0 }
+    const w = num(a.width), h = num(a.height)
+    if (w && h) return [w, h]
+    const vb = (a.viewbox ?? '').trim().split(/[\s,]+/).map(Number)
+    if (vb.length === 4 && vb[2] > 0 && vb[3] > 0) return [Math.round(vb[2]), Math.round(vb[3])]
+    return null
+  }
+  return null
+}
+async function imageDims(env: Env, origin: string, src: string): Promise<[number, number] | null> {
+  let u: URL
+  try { u = new URL(src, origin) } catch { return null }
+  if (u.origin !== origin || /^\/_[a-z0-9]{6}\//.test(u.pathname)) return null
+  const key = new Request(origin + '/_dims' + u.pathname)
+  let cache: Cache | null = null
+  try { cache = (caches as unknown as { default: Cache }).default } catch { cache = null }
+  if (cache) {
+    try {
+      const hit = await cache.match(key)
+      if (hit) { const j = await hit.json() as { w: number; h: number }; return j.w > 0 && j.h > 0 ? [j.w, j.h] : null }
+    } catch { /* read it */ }
+  }
+  let dims: [number, number] | null = null
+  try {
+    const r = await env.ASSETS.fetch(new Request(origin + u.pathname))
+    if (r.ok) {
+      const ct = r.headers.get('Content-Type') ?? ''
+      if (/^image\//i.test(ct) || /\.(?:png|gif|jpe?g|webp|svg)$/i.test(u.pathname)) {
+        const bytes = new Uint8Array(await r.arrayBuffer())
+        dims = imageSize(bytes, ct)
+      }
+    }
+  } catch { dims = null }
+  if (cache) {
+    try {
+      await cache.put(key, new Response(JSON.stringify({ w: dims?.[0] ?? 0, h: dims?.[1] ?? 0 }), { headers: { 'Content-Type': 'application/json', 'Cache-Control': dims ? 'public, max-age=604800' : 'public, max-age=86400' } }))
+    } catch { /* no cache, no harm */ }
+  }
+  return dims
+}
+// The same-origin images a page shows without both dimensions, in document
+// order, the first IMG_DIMS_MAX of them.
+function imagesWithoutSize(visible: string, origin: string): string[] {
+  const out: string[] = []
+  for (const m of visible.matchAll(/<img\b[^>]*>/gi)) {
+    const a = parseAttrs(m[0])
+    const src = (a.src ?? '').trim()
+    if (!src || /^data:/i.test(src)) continue
+    if (/^\d+$/.test((a.width ?? '').trim()) && /^\d+$/.test((a.height ?? '').trim())) continue
+    let u: URL
+    try { u = new URL(src, origin) } catch { continue }
+    if (u.origin !== origin || /^\/_[a-z0-9]{6}\//.test(u.pathname)) continue
+    if (!out.includes(src)) out.push(src)
+    if (out.length >= IMG_DIMS_MAX) break
+  }
+  return out
+}
+
 // ── The organisation behind the site ──────────────────────────────────────
 // Raptor researches it online (the business the domain belonged to: its
 // name, address and social profiles, with a source per field) and
@@ -1602,6 +1699,8 @@ interface PagePlan {
   identity: SiteIdentity | null
   /** The social profile links the page carries. */
   socials: string[]
+  /** Width and height per image src, read from the files, for the img tags that lack them. */
+  dims: Map<string, [number, number]>
 }
 
 // A stylesheet the bundle may take: plain rel="stylesheet", on this site, a
@@ -1670,7 +1769,7 @@ function nameFromClass(cls: string, lang: 'it' | 'fr'): string {
 }
 
 // Everything the rewriter needs to know before it starts, read from the text.
-function planPage(html: string, url: URL, env: Env, identity: SiteIdentity | null = null): PagePlan {
+function planPage(html: string, url: URL, env: Env, identity: SiteIdentity | null = null, dims: Map<string, [number, number]> = new Map()): PagePlan {
   const origin = url.origin
   // Scripts, comments, templates and SVG are not page content: an img or a
   // link inside them is not the first image and not a trust link.
@@ -1894,7 +1993,7 @@ function planPage(html: string, url: URL, env: Env, identity: SiteIdentity | nul
     url, origin, lang, title: head.title, pageUrl, description, ogImage, logo, publisher, contactPath, mail,
     prioritySrc, heroSrc, headExtra: add.join('\n'), skipLink, trustFooter, bundle, bundleTag, labelled, emptyNames,
     titleNames, styleTag, captions, headless, searchPath: SEARCH_PATH[lang],
-    identity, socials: pageSocials(visible),
+    identity, socials: pageSocials(visible), dims,
   }
 }
 
@@ -2162,6 +2261,15 @@ function applyPlan(p: PagePlan, response: Response): Response {
       }
       if (!el.hasAttribute('decoding')) el.setAttribute('decoding', 'async')
       if (!el.hasAttribute('alt')) el.setAttribute('alt', '')
+      // Width and height from the file, where the tag has neither or only
+      // one (the other follows the file's proportions).
+      const d = p.dims.get(src)
+      if (d) {
+        const w = parseInt(el.getAttribute('width') ?? '', 10), h = parseInt(el.getAttribute('height') ?? '', 10)
+        if (!(w > 0) && !(h > 0)) { el.setAttribute('width', String(d[0])); el.setAttribute('height', String(d[1])) }
+        else if (w > 0 && !(h > 0)) el.setAttribute('height', String(Math.max(1, Math.round(w * d[1] / d[0]))))
+        else if (h > 0 && !(w > 0)) el.setAttribute('width', String(Math.max(1, Math.round(h * d[0] / d[1]))))
+      }
     },
   })
   // An input, select or textarea the audit would count as unlabelled: no
@@ -2242,8 +2350,16 @@ async function fixPage(response: Response, request: Request, env: Env): Promise<
   const pageUrl = new URL(request.url)
   // The organisation is only read for a page that has JSON-LD to complete.
   const identity = /application\/ld\+json/i.test(html) ? await identityFor(env, pageUrl.hostname) : null
+  // The images without width and height: their sizes from the files, in parallel.
+  const dims = new Map<string, [number, number]>()
+  try {
+    const visible = html.replace(/<!--[\s\S]*?-->/g, '').replace(/<(script|noscript|template|svg)\b[\s\S]*?<\/\1\s*>/gi, '')
+    const need = imagesWithoutSize(visible, pageUrl.origin)
+    const sizes = await Promise.all(need.map((src) => imageDims(env, pageUrl.origin, src)))
+    need.forEach((src, i) => { const d = sizes[i]; if (d) dims.set(src, d) })
+  } catch { /* the page without sizes */ }
   let plan: PagePlan
-  try { plan = planPage(html, pageUrl, env, identity) } catch { return again(html) }
+  try { plan = planPage(html, pageUrl, env, identity, dims) } catch { return again(html) }
   return applyPlan(plan, again(html))
 }
 
