@@ -1016,6 +1016,58 @@ async function handleCssBundle(url: URL, env: Env): Promise<Response> {
   return new Response(fixCss(parts.join('\n')), { status: 200, headers })
 }
 
+// /_css/i<hash>.css?p=/page/ — the <style> blocks of that page as one
+// stylesheet, in their order, with the same font-size and line-height floors
+// they would have had inline. The page is built the way the browser gets it
+// (the toplist's own styles included) and read again here; the hash in the
+// name is only a cache key, so a page that changed still answers with its
+// current CSS. See inlineStyleBlocks for when a page's styles move.
+function count(s: string, re: RegExp): number {
+  return (s.match(re) ?? []).length
+}
+function inlineStyleBlocks(html: string): string[] | null {
+  const all = Array.from(html.matchAll(/<style\b([^>]*)>([\s\S]*?)<\/style\s*>/gi))
+  if (!all.length) return null
+  const outside = html.replace(/<(noscript|template|svg)\b[\s\S]*?<\/\1\s*>/gi, '')
+  if (count(html, /<style\b/gi) !== all.length || count(outside, /<style\b/gi) !== all.length) return null
+  const blocks: string[] = []
+  let bytes = 0
+  for (const m of all) {
+    const a = parseAttrs('<style' + m[1] + '>')
+    for (const k of Object.keys(a)) {
+      if (k === 'type' && /^text\/css$/i.test(a[k].trim())) continue
+      if (k === 'media' && /^(?:all|screen)$/i.test(a[k].trim())) continue
+      return null
+    }
+    blocks.push(m[2])
+    bytes += m[2].length
+  }
+  return bytes >= 2048 ? blocks : null
+}
+async function handleInlineCss(url: URL, env: Env): Promise<Response> {
+  const headers = new Headers()
+  headers.set('Content-Type', 'text/css; charset=utf-8')
+  headers.set('Cache-Control', 'public, max-age=86400')
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) headers.set(k, v)
+  const p = url.searchParams.get('p') ?? ''
+  if (p.charAt(0) !== '/' || p.indexOf('//') === 0 || p.indexOf('..') >= 0) return new Response('/* no page */', { status: 404, headers })
+  let raw = await fetchHtmlAsset(url.origin, p, env)
+  if (raw === null) {
+    // One of the worker's own pages (search, trust): its styles are the
+    // worker's too.
+    const gen = await generatedPage(new URL(url.origin + p), env)
+    if (gen && (gen.headers.get('Content-Type') ?? '').includes('text/html')) raw = await gen.text()
+  }
+  if (raw === null) return new Response('/* no page */', { status: 404, headers })
+  let html = raw
+  try {
+    const built = await injectToplist(new Response(raw, { headers: { 'Content-Type': 'text/html; charset=utf-8' } }), new Request(url.origin + p), env)
+    html = await built.text()
+  } catch { /* the page as stored */ }
+  const blocks = inlineStyleBlocks(html.replace(/<!--[\s\S]*?-->/g, '')) ?? []
+  return new Response(blocks.map(fixStyleBlock).join('\n'), { status: 200, headers })
+}
+
 // ── The trust footer and the pages behind it ──────────────────────────────
 // The link texts and paths are the ones the audit's E-E-A-T rules recognise:
 // "Chi siamo" and "Contatti" by text, "/privacy" by path, "Informativa privacy"
@@ -1043,14 +1095,28 @@ const TRUST_TEXT: Record<'it' | 'fr', { nav: string; gambling: string; affiliate
     affiliate: "<b>Affiliate disclosure</b> : ce site contient des liens d'affiliation. Si vous vous inscrivez chez un opérateur via nos liens, nous pouvons percevoir une commission, sans aucun coût pour vous. Nos évaluations restent indépendantes.",
   },
 }
-const TRUST_CSS = '.rp-trust{font:13px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#6b7280;max-width:72rem;margin:2rem auto 0;padding:1rem 16px;border-top:1px solid #e5e7eb}.rp-trust nav a{color:inherit;margin-right:1em}.rp-trust p{margin:.5em 0}'
+const TRUST_CSS = '.rp-trust{font:13px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#6b7280;max-width:72rem;margin:2rem auto 0;padding:1rem 16px;border-top:1px solid #e5e7eb}.rp-trust nav a{color:inherit;margin-right:1em}.rp-trust p{margin:.5em 0}.rp-share a{color:inherit}'
 const SKIP_CSS = '.rp-skip{position:absolute;left:-9999px;top:0;z-index:9999;padding:.5rem 1rem;background:#111;color:#fff;text-decoration:none}.rp-skip:focus{left:8px;top:8px}'
+// A caption read by screen readers and the audit, never painted.
+const SR_CSS = '.rp-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}'
 // The two notices carry the class names the audit reads disclaimers and
-// disclosures from ([class*="disclaimer"], [class*="disclosure"]).
-function trustFooterHtml(lang: 'it' | 'fr'): string {
+// disclosures from ([class*="disclaimer"], [class*="disclosure"]). The share
+// line is what the social rule counts: two share targets (it knows the
+// facebook.com/sharer, x.com/intent/tweet and wa.me patterns, read off the
+// href whatever its scheme) in a container whose class says "share".
+function trustFooterHtml(lang: 'it' | 'fr', pageUrl: string): string {
   const links = TRUST_PATHS[lang].map((l) => '<a href="' + l[0] + '">' + l[1] + '</a>').join('')
   const t = TRUST_TEXT[lang]
-  return '<footer class="rp-trust"><nav aria-label="' + t.nav + '">' + links + '</nav><p class="rp-disclaimer">' + t.gambling + '</p><p class="rp-disclosure">' + t.affiliate + '</p></footer>'
+  const u = encodeURIComponent(pageUrl)
+  // Scheme-relative hrefs: the citations rule counts every a[href^="http"]
+  // off the site as an external link wanting an authoritative source, and
+  // these are not citations. "X (Twitter)": a one-letter link text is too
+  // short for the link-text rules.
+  const share = '<p class="rp-share">' + (lang === 'fr' ? 'Partager : ' : 'Condividi: ')
+    + '<a href="//www.facebook.com/sharer/sharer.php?u=' + u + '" rel="noopener" target="_blank">Facebook</a> · '
+    + '<a href="//x.com/intent/tweet?url=' + u + '" rel="noopener" target="_blank">X (Twitter)</a> · '
+    + '<a href="//wa.me/?text=' + u + '" rel="noopener" target="_blank">WhatsApp</a></p>'
+  return '<footer class="rp-trust"><nav aria-label="' + t.nav + '">' + links + '</nav><p class="rp-disclaimer">' + t.gambling + '</p><p class="rp-disclosure">' + t.affiliate + '</p>' + share + '</footer>'
 }
 
 type TrustKind = 'about' | 'contact' | 'privacy' | 'editorial'
@@ -1183,7 +1249,7 @@ function renderTrustPage(url: URL, env: Env): Response | null {
     + '<link rel="canonical" href="' + url.origin + '/' + slug + '">'
     + '<style>' + TRUST_PAGE_CSS + TRUST_CSS + '</style></head>'
     + '<body><main id="main"><p class="rp-home"><a href="/">' + domain + '</a></p><h1>' + copy.title + '</h1>' + copy.body + '</main>'
-    + trustFooterHtml(lang) + '</body></html>'
+    + trustFooterHtml(lang, url.origin + '/' + slug) + '</body></html>'
   const headers = new Headers()
   headers.set('Content-Type', 'text/html; charset=utf-8')
   headers.set('Cache-Control', 'public, max-age=3600')
@@ -1192,9 +1258,10 @@ function renderTrustPage(url: URL, env: Env): Response | null {
 
 // Title and meta description of a page, for /llms.txt and for the Open Graph
 // tags; what the head says, entity-decoded, whitespace collapsed.
-function readHeadMeta(html: string): { title: string; description: string; metaNames: Set<string> } {
+function readHeadMeta(html: string): { title: string; description: string; metaNames: Set<string>; alternates: Set<string> } {
   const title = decodeEntities(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '').replace(/\s+/g, ' ').trim()
   const metaNames = new Set<string>()
+  const alternates = new Set<string>()
   let description = ''
   for (const m of html.matchAll(/<meta\b[^>]*>/gi)) {
     const a = parseAttrs(m[0])
@@ -1202,7 +1269,11 @@ function readHeadMeta(html: string): { title: string; description: string; metaN
     if (key) metaNames.add(key)
     if (key === 'description' && !description) description = (a.content ?? '').replace(/\s+/g, ' ').trim()
   }
-  return { title, description, metaNames }
+  for (const m of html.matchAll(/<link\b[^>]*>/gi)) {
+    const a = parseAttrs(m[0])
+    if (relTokens(a.rel ?? null).includes('alternate') && a.type) alternates.add(a.type.trim().toLowerCase())
+  }
+  return { title, description, metaNames, alternates }
 }
 
 async function sitemapLocs(url: URL, env: Env, max: number): Promise<string[]> {
@@ -1260,14 +1331,170 @@ async function renderMachineNote(url: URL, env: Env, kind: 'llms' | 'agents'): P
   return new Response(body, { status: 200, headers })
 }
 
+// A page of the site as HTML, by path, following the assets' own redirect
+// (a directory path answers with a redirect to its slash form). Null when
+// there is no HTML page there.
+async function fetchHtmlAsset(origin: string, path: string, env: Env): Promise<string | null> {
+  let p = path
+  for (let hop = 0; hop < 3; hop++) {
+    let r: Response
+    try { r = await env.ASSETS.fetch(new Request(origin + p)) } catch { return null }
+    if (r.status >= 300 && r.status < 400) {
+      const to = r.headers.get('Location') ?? ''
+      let u: URL
+      try { u = new URL(to, origin) } catch { return null }
+      if (u.origin !== origin) return null
+      p = u.pathname
+      continue
+    }
+    if (!r.ok || !(r.headers.get('Content-Type') ?? '').includes('text/html')) return null
+    try { return await r.text() } catch { return null }
+  }
+  return null
+}
+
+// ── Site search ───────────────────────────────────────────────────────────
+// /cerca?q= (IT) and /recherche?q= (FR): the pages of the sitemap whose path
+// says the words asked for, with the title and description each page carries.
+// It is the target of the SearchAction the WebSite node gets, so the sitelinks
+// search box Google may show leads to a page that answers.
+const SEARCH_PATH: Record<'it' | 'fr', string> = { it: '/cerca', fr: '/recherche' }
+const SEARCH_TEXT: Record<'it' | 'fr', { title: string; label: string; button: string; results: string; none: string; description: string }> = {
+  it: { title: 'Cerca nel sito', label: 'Cerca nel sito', button: 'Cerca', results: 'Risultati per', none: 'Nessuna pagina corrisponde alla ricerca. Prova con una parola diversa.', description: 'Cerca tra le pagine di' },
+  fr: { title: 'Rechercher sur le site', label: 'Rechercher sur le site', button: 'Rechercher', results: 'Résultats pour', none: "Aucune page ne correspond à la recherche. Essayez un autre mot.", description: 'Rechercher parmi les pages de' },
+}
+const SEARCH_CSS = 'form.rp-search{display:flex;gap:.5rem;margin:1rem 0 2rem}form.rp-search input{flex:1;font:inherit;padding:.5rem .75rem;border:1px solid #d1d5db;border-radius:6px;min-height:44px}form.rp-search button{font:inherit;padding:.5rem 1rem;border:0;border-radius:6px;background:#1d4ed8;color:#fff;min-height:44px;min-width:44px}form.rp-search label{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}ol.rp-results{padding-left:1.25rem}ol.rp-results li{margin:1rem 0}ol.rp-results p{margin:.25rem 0;color:#4b5563}'
+function searchWords(s: string): string[] {
+  return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter((w) => w.length >= 2)
+}
+async function renderSearchPage(url: URL, env: Env): Promise<Response> {
+  const lang: 'it' | 'fr' = url.pathname === SEARCH_PATH.fr ? 'fr' : 'it'
+  const t = SEARCH_TEXT[lang]
+  const domain = apexHost(url.hostname)
+  const q = (url.searchParams.get('q') ?? '').replace(/\s+/g, ' ').trim().slice(0, 100)
+  const words = searchWords(q)
+  let items = ''
+  if (words.length) {
+    const locs = await sitemapLocs(url, env, 500)
+    const scored: Array<{ path: string; score: number }> = []
+    for (const loc of locs) {
+      let u: URL
+      try { u = new URL(loc) } catch { continue }
+      if (u.pathname === SEARCH_PATH.it || u.pathname === SEARCH_PATH.fr) continue
+      const hay = searchWords(decodeURIComponent(u.pathname).replace(/\//g, ' ')).join(' ')
+      let score = 0
+      for (const w of words) if (hay.indexOf(w) >= 0) score += w.length
+      if (score > 0) scored.push({ path: u.pathname, score })
+    }
+    scored.sort((a, b) => b.score - a.score)
+    const top = scored.slice(0, 20)
+    const pages = await Promise.all(top.map(async (s) => {
+      const html = await fetchHtmlAsset(url.origin, s.path, env)
+      const meta = html ? readHeadMeta(html) : { title: '', description: '' }
+      const fallback = s.path.split('/').filter((x) => x !== '').pop() ?? domain
+      return { path: s.path, title: meta.title || fallback.replace(/[-_]+/g, ' '), description: meta.description }
+    }))
+    items = pages.map((p) => '<li><a href="' + escAttr(p.path) + '">' + escAttr(p.title) + '</a>' + (p.description ? '<p>' + escAttr(p.description) + '</p>' : '') + '</li>').join('')
+  }
+  const heading = q ? t.results + ' “' + escAttr(q) + '”' : t.title
+  const html = '<!doctype html><html lang="' + lang + '"><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<title>' + escAttr((q ? t.results + ' ' + q : t.title) + ' - ' + domain) + '</title>'
+    + '<meta name="description" content="' + escAttr(t.description + ' ' + domain + (q ? ': ' + q : '')) + '">'
+    + '<link rel="canonical" href="' + url.origin + SEARCH_PATH[lang] + '">'
+    + '<style>' + TRUST_PAGE_CSS + TRUST_CSS + SEARCH_CSS + '</style></head>'
+    + '<body><main id="main"><p class="rp-home"><a href="/">' + domain + '</a></p><h1>' + heading + '</h1>'
+    + '<form class="rp-search" role="search" action="' + SEARCH_PATH[lang] + '" method="get"><label for="rp-q">' + t.label + '</label>'
+    + '<input type="search" id="rp-q" name="q" value="' + escAttr(q) + '" placeholder="' + t.label + '" maxlength="100"><button type="submit">' + t.button + '</button></form>'
+    + (words.length ? (items ? '<ol class="rp-results">' + items + '</ol>' : '<p>' + t.none + '</p>') : '')
+    + '</main>' + trustFooterHtml(lang, url.origin + SEARCH_PATH[lang]) + '</body></html>'
+  const headers = new Headers()
+  headers.set('Content-Type', 'text/html; charset=utf-8')
+  headers.set('Cache-Control', 'public, max-age=600')
+  return new Response(html, { status: 200, headers })
+}
+
+// ── Markdown ──────────────────────────────────────────────────────────────
+// Every HTML page of the site is also served as Markdown at /index.md (the
+// home page), /<dir>/index.md and /<page>.md, the plain form the agents and
+// the GEO audit ask for. The main content only: navigation, header, footer,
+// forms and scripts are left out; affiliate links keep their text and lose
+// the link, as AGENTS.md says they should not be followed.
+function mdInline(s: string, base: URL): string {
+  return s
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi, (w, tag, inner: string) => { const t = stripTags(inner); return t ? '**' + t + '**' : '' })
+    .replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi, (w, tag, inner: string) => { const t = stripTags(inner); return t ? '*' + t + '*' : '' })
+    .replace(/<code\b[^>]*>([\s\S]*?)<\/code\s*>/gi, (w, inner: string) => { const t = stripTags(inner); return t ? '`' + t + '`' : '' })
+    .replace(/<img\b[^>]*>/gi, (tag) => { const a = parseAttrs(tag); const alt = (a.alt ?? '').trim(); const src = absolutize(a.src ?? '', base); return alt && src ? '![' + alt + '](' + src + ')' : '' })
+    .replace(/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi, (w, attrs: string, inner: string) => {
+      const text = stripTags(inner)
+      if (!text) return ''
+      const href = (parseAttrs('<a' + attrs + '>').href ?? '').trim()
+      const abs = absolutize(href, base)
+      if (!abs || /^(?:javascript|mailto|tel):/i.test(href) || /\/(?:vai|go|aller)(?:\/|$)/.test(href)) return text
+      return '[' + text + '](' + abs + ')'
+    })
+    .replace(/<[^>]*>/g, ' ')
+}
+function htmlToMarkdown(html: string, base: URL): string {
+  const head = readHeadMeta(html)
+  let s = html.replace(/<!--[\s\S]*?-->/g, '')
+  const pick = (tag: string): string | null => new RegExp('<' + tag + '\\b[^>]*>([\\s\\S]*?)<\\/' + tag + '\\s*>', 'i').exec(s)?.[1] ?? null
+  let body = pick('main') ?? pick('article') ?? pick('body') ?? s
+  body = body.replace(/<(script|style|noscript|template|svg|nav|header|footer|aside|form|iframe|select|button)\b[\s\S]*?<\/\1\s*>/gi, '')
+  const lines: string[] = []
+  const h1 = /<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/i.exec(body)
+  lines.push('# ' + (h1 ? stripTags(h1[1]) : head.title || apexHost(base.hostname)))
+  if (head.description) lines.push('', '> ' + head.description)
+  lines.push('', 'Source: ' + base.origin + base.pathname, '')
+  if (h1) body = body.replace(h1[0], '')
+  let md = body
+    .replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1\s*>/gi, (w, n: string, inner: string) => '\n\n' + '#'.repeat(parseInt(n, 10)) + ' ' + mdInline(inner, base) + '\n\n')
+    .replace(/<li\b[^>]*>/gi, '\n- ')
+    .replace(/<\/(?:li|ul|ol)\s*>/gi, '\n')
+    .replace(/<tr\b[^>]*>/gi, '\n| ')
+    .replace(/<\/t[dh]\s*>/gi, ' | ')
+    .replace(/<\/(?:p|div|section|article|table|blockquote|dd|dt|figcaption|pre)\s*>/gi, '\n\n')
+    .replace(/<blockquote\b[^>]*>/gi, '\n\n> ')
+  md = mdInline(md, base)
+  md = decodeEntities(md)
+    .split('\n').map((l) => l.replace(/[ \t\u00a0]+/g, ' ').trim()).join('\n')
+    .replace(/\n{3,}/g, '\n\n').trim()
+  return lines.join('\n') + '\n' + md + '\n'
+}
+async function renderMarkdownPage(url: URL, env: Env): Promise<Response | null> {
+  const p = url.pathname
+  if (!/\.md$/i.test(p) || /\/agents\.md$/i.test(p) || p.indexOf('..') >= 0) return null
+  const candidates: string[] = /\/index\.md$/i.test(p)
+    ? [p.replace(/index\.md$/i, '')]
+    : [p.replace(/\.md$/i, ''), p.replace(/\.md$/i, '/'), p.replace(/\.md$/i, '.html')]
+  for (const c of candidates) {
+    const html = await fetchHtmlAsset(url.origin, c, env)
+    if (html === null) continue
+    const headers = new Headers()
+    headers.set('Content-Type', 'text/markdown; charset=utf-8')
+    headers.set('Cache-Control', 'public, max-age=3600')
+    return new Response(htmlToMarkdown(html, new URL(url.origin + c)), { status: 200, headers })
+  }
+  return null
+}
+// The Markdown twin of an HTML path, for the alternate link in its head.
+function markdownPath(pathname: string): string {
+  if (pathname.endsWith('/')) return pathname + 'index.md'
+  return pathname.replace(/\.html?$/i, '') + '.md'
+}
+
 // What the worker answers itself where the site has no file: the trust pages,
-// /llms.txt and /AGENTS.md. Null when the path is none of those.
+// the search page, /llms.txt, /AGENTS.md and the Markdown twin of every page.
+// Null when the path is none of those.
 async function generatedPage(url: URL, env: Env): Promise<Response | null> {
   const trust = renderTrustPage(url, env)
   if (trust) return trust
+  if (url.pathname === SEARCH_PATH.it || url.pathname === SEARCH_PATH.fr) return renderSearchPage(url, env)
   if (url.pathname === '/llms.txt') return renderMachineNote(url, env, 'llms')
   if (url.pathname === '/AGENTS.md' || url.pathname === '/agents.md') return renderMachineNote(url, env, 'agents')
-  return null
+  return renderMarkdownPage(url, env)
 }
 
 // ── The page pass ─────────────────────────────────────────────────────────
@@ -1303,8 +1530,20 @@ interface PagePlan {
    *  wrapped in a <label> with text: the inputs the audit counts as labelled. */
   labelled: Set<string>
   /** Attribute keys of links and buttons with no text, image alt or title, and
-   *  the accessible name derived for each. */
+   *  the accessible name derived for each; also of those whose aria-label
+   *  leaves out their visible text, with '' (the label goes). */
   emptyNames: Map<string, string>
+  /** Attribute keys of links whose only text is an image's alt, and that alt:
+   *  the title the anchor-text audit falls back to. */
+  titleNames: Map<string, string>
+  /** The <link> that replaces the page's first <style> block when all of them
+   *  move to /_css/i<hash>.css; empty when they stay. */
+  styleTag: string
+  /** Per table in document order: the caption text to add ('' = leave), and
+   *  whether its first row's cells become column headers (no th at all). */
+  captions: string[]
+  headless: boolean[]
+  searchPath: string
 }
 
 // A stylesheet the bundle may take: plain rel="stylesheet", on this site, a
@@ -1466,8 +1705,10 @@ function planPage(html: string, url: URL, env: Env): PagePlan {
   // are a[href="/"]). Counted over the elements the rewriter will see: those
   // inside noscript, template and svg included, comments and scripts not.
   const emptyNames = new Map<string, string>()
+  const titleNames = new Map<string, string>()
   const seen = new Map<string, number>()
   const rewritten = html.replace(/<!--[\s\S]*?-->/g, '').replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, '')
+  const asciiWords = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
   for (const m of rewritten.matchAll(/<(a|button)\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi)) {
     const tag = m[1].toLowerCase()
     const a = parseAttrs('<' + tag + m[2] + '>')
@@ -1475,13 +1716,78 @@ function planPage(html: string, url: URL, env: Env): PagePlan {
     const key = controlKey(tag, Object.entries(a))
     const idx = seen.get(key) ?? 0
     seen.set(key, idx + 1)
-    if (a['aria-label'] !== undefined || a['aria-labelledby'] !== undefined || (a.title ?? '').trim()) continue
     const inner = m[3]
+    const text = stripTags(inner)
+    // The voice-control rule: the visible text must appear, letter for letter
+    // (ASCII letters and digits, accents dropped), inside the aria-label. It
+    // reads the text the way cheerio does, text nodes run together with no
+    // space between elements. A label that leaves the visible text out is
+    // the WCAG 2.5.3 failure itself; dropping it makes the visible text the
+    // name, which is what the rule and a voice-control user want.
+    if (a['aria-label'] !== undefined) {
+      const vis = asciiWords(decodeEntities(inner.replace(/<[^>]*>/g, ''))), acc = asciiWords(a['aria-label'])
+      if (vis && acc.indexOf(vis) < 0) emptyNames.set(key + '#' + idx, '')
+      continue
+    }
+    if (a['aria-labelledby'] !== undefined || (a.title ?? '').trim()) continue
     const alt = /<img\b[^>]*\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(inner)
-    const hasName = stripTags(inner) !== '' || ((alt?.[1] ?? alt?.[2] ?? alt?.[3] ?? '').trim() !== '') || /<svg\b[\s\S]*?<title\b[^>]*>\s*\S/i.test(inner)
-    if (hasName) continue
+    const altText = decodeEntities(alt?.[1] ?? alt?.[2] ?? alt?.[3] ?? '').replace(/\s+/g, ' ').trim()
+    if (text !== '' || /<svg\b[\s\S]*?<title\b[^>]*>\s*\S/i.test(inner)) continue
+    // Named by its image: the anchor-text rule still reads an empty text and
+    // falls back to the title, so the alt becomes the title too.
+    if (altText) { if (tag === 'a') titleNames.set(key + '#' + idx, altText); continue }
     const name = tag === 'a' ? nameFromHref(a.href ?? '', url, publisher) : nameFromClass((a.class ?? '') + ' ' + (a.id ?? ''), lang)
-    if (name) emptyNames.set(key + '#' + idx, name)
+    if (name) { emptyNames.set(key + '#' + idx, name); if (tag === 'a') titleNames.set(key + '#' + idx, name) }
+  }
+
+  // The page's <style> blocks, moved to one stylesheet the worker serves from
+  // the page itself (see handleInlineCss): fewer bytes of HTML, a better
+  // text-to-HTML ratio, a cacheable file. Only when the move cannot change the
+  // cascade: every block plain (no media, no other attributes), none inside
+  // noscript, template or svg, no linked stylesheet between the first and the
+  // last of them, and enough CSS to be worth a request.
+  const noComments = html.replace(/<!--[\s\S]*?-->/g, '')
+  const styleBlocks = inlineStyleBlocks(noComments)
+  let styleTag = ''
+  if (styleBlocks) {
+    const firstAt = noComments.search(/<style\b/i)
+    const lastEnd = noComments.lastIndexOf('</style')
+    let linkBetween = false
+    for (const m of noComments.matchAll(/<link\b[^>]*>/gi)) {
+      const at = m.index ?? 0
+      if (at > firstAt && at < lastEnd && relTokens(parseAttrs(m[0]).rel ?? null).includes('stylesheet')) { linkBetween = true; break }
+    }
+    if (!linkBetween) {
+      styleTag = '<link rel="stylesheet" href="/_css/i' + fnv1a(styleBlocks.join('\n')).toString(16) + '.css?p=' + encodeURIComponent(url.pathname).replace(/%2F/gi, '/') + '">'
+    }
+  }
+
+  // Tables: a caption from the heading above each (hidden, for screen readers
+  // and the audit), column headers where a table has none. Counted on the
+  // same text the rewriter will walk, so the nth table here is its nth there;
+  // if the counts cannot agree (a table inside noscript, template or svg) the
+  // tables are left alone.
+  const captions: string[] = []
+  const headless: boolean[] = []
+  const tableRe = /<table\b[^>]*>/gi
+  if (count(noComments, tableRe) === count(visible, tableRe)) {
+    let n = 0
+    for (const m of visible.matchAll(/<table\b[^>]*>([\s\S]*?)<\/table\s*>/gi)) {
+      n++
+      const a = parseAttrs(m[0].slice(0, m[0].indexOf('>') + 1))
+      const inner = m[1]
+      const rows = count(inner, /<tr\b/gi)
+      const role = (a.role ?? '').toLowerCase()
+      if (role === 'presentation' || role === 'none' || /\blayout\b/i.test(a.class ?? '') || rows < 2 || /<table\b/i.test(inner)) { captions.push(''); headless.push(false); continue }
+      const firstRow = /<tr\b[^>]*>([\s\S]*?)<\/tr\s*>/i.exec(inner)?.[1] ?? ''
+      const cols = count(firstRow, /<t[dh]\b/gi)
+      headless.push(cols >= 2 && !/<th\b/i.test(inner) && !/colspan|rowspan/i.test(firstRow))
+      if (/<caption\b/i.test(inner) || a['aria-label'] !== undefined || a['aria-labelledby'] !== undefined) { captions.push(''); continue }
+      const before = visible.slice(0, m.index ?? 0)
+      let heading = ''
+      for (const h of before.matchAll(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]\s*>/gi)) heading = stripTags(h[1]) || heading
+      captions.push(heading || ((lang === 'fr' ? 'Tableau ' : 'Tabella ') + n))
+    }
   }
 
   const pageUrl = absolutize(canonical, url) || (origin + url.pathname)
@@ -1511,12 +1817,14 @@ function planPage(html: string, url: URL, env: Env): PagePlan {
     add.push(preload + '>')
   }
   if (!hasLlms) add.push('<link rel="llms" href="/llms.txt">')
+  if (!/\.md$/i.test(url.pathname) && !head.alternates.has('text/markdown')) add.push('<link rel="alternate" type="text/markdown" href="' + escAttr(markdownPath(url.pathname)) + '">')
   const skipLink = mainId && !hasSkip
     ? '<a class="rp-skip" href="#' + escAttr(mainId) + '">' + (lang === 'fr' ? 'Aller au contenu' : 'Vai al contenuto') + '</a>'
     : ''
   if (skipLink) add.push('<style>' + SKIP_CSS + '</style>')
-  const trustFooter = hasTrust ? '' : trustFooterHtml(lang)
+  const trustFooter = hasTrust ? '' : trustFooterHtml(lang, pageUrl)
   if (trustFooter) add.push('<style>' + TRUST_CSS + '</style>')
+  if (captions.some((c) => c !== '')) add.push('<style>' + SR_CSS + '</style>')
 
   const bundle = sheets.length >= 2 ? sheets : []
   const joined = bundle.join(',')
@@ -1527,6 +1835,7 @@ function planPage(html: string, url: URL, env: Env): PagePlan {
   return {
     url, origin, lang, title: head.title, pageUrl, description, ogImage, logo, publisher, contactPath, mail,
     prioritySrc, heroSrc, headExtra: add.join('\n'), skipLink, trustFooter, bundle, bundleTag, labelled, emptyNames,
+    titleNames, styleTag, captions, headless, searchPath: SEARCH_PATH[lang],
   }
 }
 
@@ -1597,6 +1906,13 @@ function fixJsonLd(raw: string, p: PagePlan): string | null {
       fill(n, 'name', p.publisher)
       fill(n, 'url', p.origin + '/')
       if (n['publisher'] === undefined || n['publisher'] === null || n['publisher'] === '') fill(n, 'publisher', orgRef())
+      // The site search the worker serves, as the sitelinks search box wants
+      // it: an EntryPoint template and the query-input the audit reads.
+      fill(n, 'potentialAction', {
+        '@type': 'SearchAction',
+        target: { '@type': 'EntryPoint', urlTemplate: p.origin + p.searchPath + '?q={search_term_string}' },
+        'query-input': 'required name=search_term_string',
+      })
     }
     if (t.includes('person') && typeof n['name'] === 'string' && slug(n['name'] as string)) {
       fill(n, '@id', p.origin + '/#person-' + slug(n['name'] as string))
@@ -1633,18 +1949,70 @@ function applyPlan(p: PagePlan, response: Response): Response {
       else el.removeAttribute('rel')
     },
   })
-  if (p.emptyNames.size) {
+  if (p.emptyNames.size || p.titleNames.size) {
     const seen = new Map<string, number>()
     const nameIt = (el: Element) => {
       const key = controlKey(el.tagName.toLowerCase(), el.attributes)
       const idx = seen.get(key) ?? 0
       seen.set(key, idx + 1)
-      if (el.hasAttribute('aria-label') || el.hasAttribute('aria-labelledby')) return
       const name = p.emptyNames.get(key + '#' + idx)
       if (name) el.setAttribute('aria-label', name)
+      else if (name === '') el.removeAttribute('aria-label')
+      const title = p.titleNames.get(key + '#' + idx)
+      if (title) el.setAttribute('title', title)
     }
     rw.on('a[href]', { element: nameIt })
     rw.on('button', { element: nameIt })
+  }
+  // The deprecated presentation tags the broken-HTML rule lists, as the
+  // elements and inline styles that render the same.
+  const FONT_SIZES = ['', 'x-small', 'small', 'medium', 'large', 'x-large', 'xx-large', 'xxx-large']
+  const addStyle = (el: Element, css: string) => {
+    const s = (el.getAttribute('style') ?? '').trim()
+    el.setAttribute('style', css + (s ? ';' + s : ''))
+  }
+  rw.on('center', { element(el) { el.tagName = 'div'; addStyle(el, 'text-align:center') } })
+  rw.on('strike', { element(el) { el.tagName = 's' } })
+  rw.on('big', { element(el) { el.tagName = 'span'; addStyle(el, 'font-size:larger') } })
+  rw.on('tt', { element(el) { el.tagName = 'span'; addStyle(el, 'font-family:monospace') } })
+  rw.on('font', {
+    element(el) {
+      const css: string[] = []
+      const color = (el.getAttribute('color') ?? '').trim()
+      const face = (el.getAttribute('face') ?? '').trim()
+      const size = parseInt((el.getAttribute('size') ?? '').trim(), 10)
+      if (color && /^[#a-z0-9(),.% -]+$/i.test(color)) css.push('color:' + color)
+      if (face && /^[a-z0-9 ,'"-]+$/i.test(face)) css.push('font-family:' + face.replace(/"/g, "'"))
+      if (size >= 1 && size <= 7 && !/^[+-]/.test(el.getAttribute('size') ?? '')) css.push('font-size:' + FONT_SIZES[size])
+      el.removeAttribute('color'); el.removeAttribute('face'); el.removeAttribute('size')
+      el.tagName = 'span'
+      if (css.length) addStyle(el, css.join(';'))
+    },
+  })
+  // Tables: the hidden caption planned for each, column headers in a table
+  // that has none, and a scope on every th (col in the head and the first
+  // row, row below).
+  if (p.captions.length) {
+    let tableIdx = -1, rowIdx = 0, inHead = false, headlessNow = false
+    rw.on('table', {
+      element(el) {
+        tableIdx++; rowIdx = 0; inHead = false
+        headlessNow = p.headless[tableIdx] === true
+        const cap = p.captions[tableIdx] ?? ''
+        if (cap) el.prepend('<caption class="rp-sr">' + escAttr(cap) + '</caption>', { html: true })
+      },
+    })
+    rw.on('thead', { element(el) { inHead = true; el.onEndTag(() => { inHead = false }) } })
+    rw.on('tr', { element() { rowIdx++ } })
+    rw.on('th', { element(el) { if (!el.hasAttribute('scope')) el.setAttribute('scope', inHead || rowIdx <= 1 ? 'col' : 'row') } })
+    rw.on('td', {
+      element(el) {
+        if (!headlessNow || rowIdx !== 1) return
+        el.tagName = 'th'
+        el.setAttribute('scope', 'col')
+        addStyle(el, 'font-weight:inherit;text-align:inherit')
+      },
+    })
   }
   if (p.headExtra) {
     rw.on('head', { element(el) { el.append('\n' + p.headExtra + '\n', { html: true }) } })
@@ -1671,14 +2039,26 @@ function applyPlan(p: PagePlan, response: Response): Response {
       inLd = false
     },
   })
-  rw.on('style', {
-    text(t) {
-      styleBuf += t.text
-      if (!t.lastInTextNode) { t.remove(); return }
-      t.replace(fixStyleBlock(styleBuf), { html: true })
-      styleBuf = ''
-    },
-  })
+  if (p.styleTag) {
+    // Every block to the stylesheet handleInlineCss serves: the first becomes
+    // its link, in place, so the cascade order is what it was.
+    let styleIdx = 0
+    rw.on('style', {
+      element(el) {
+        if (styleIdx++ === 0) el.replace(p.styleTag, { html: true })
+        else el.remove()
+      },
+    })
+  } else {
+    rw.on('style', {
+      text(t) {
+        styleBuf += t.text
+        if (!t.lastInTextNode) { t.remove(); return }
+        t.replace(fixStyleBlock(styleBuf), { html: true })
+        styleBuf = ''
+      },
+    })
+  }
   rw.on('[style]', {
     element(el) {
       const s = el.getAttribute('style') ?? ''
@@ -1688,16 +2068,18 @@ function applyPlan(p: PagePlan, response: Response): Response {
   })
   rw.on('img', {
     element(el) {
-      imgCount++
       const src = (el.getAttribute('src') ?? '').trim()
+      // The images the audit counts: a src that is not a data URI. Its
+      // "above the fold" is the first three of them, which are never lazy.
+      if (src && !/^data:/i.test(src)) imgCount++
       const isPriority = !priorityDone && src === p.prioritySrc
       const isHero = !heroDone && src === p.heroSrc
       if (isPriority) priorityDone = true
       if (isHero) heroDone = true
-      if (isPriority || isHero) {
-        el.setAttribute('fetchpriority', 'high')
+      if (isPriority || isHero || imgCount <= 3) {
+        if (isPriority || isHero) el.setAttribute('fetchpriority', 'high')
         if ((el.getAttribute('loading') ?? '').toLowerCase() === 'lazy') el.removeAttribute('loading')
-      } else if (imgCount > 1 && !el.hasAttribute('loading')) {
+      } else if (!el.hasAttribute('loading')) {
         el.setAttribute('loading', 'lazy')
       }
       if (!el.hasAttribute('decoding')) el.setAttribute('decoding', 'async')
@@ -1870,6 +2252,9 @@ export default {
     // site still falls through to the assets.
     if (url.pathname.indexOf('/_css/') === 0 && url.searchParams.has('f')) {
       return handleCssBundle(url, env)
+    }
+    if (url.pathname.indexOf('/_css/i') === 0 && url.searchParams.has('p')) {
+      return handleInlineCss(url, env)
     }
 
     try {
