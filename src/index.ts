@@ -1497,6 +1497,60 @@ async function generatedPage(url: URL, env: Env): Promise<Response | null> {
   return renderMarkdownPage(url, env)
 }
 
+// ── The organisation behind the site ──────────────────────────────────────
+// Raptor researches it online (the business the domain belonged to: its
+// name, address and social profiles, with a source per field) and
+// toplist-edge serves the result as /identity/<domain>.json. Read once an
+// hour per isolate and only for pages that carry JSON-LD, where it completes
+// the Organization node; a miss, a 404 or a slow answer is simply no
+// identity, never a slower page.
+interface SiteIdentity { name?: string; legalName?: string; vatID?: string; telephone?: string; email?: string; address?: Record<string, string>; sameAs?: string[] }
+const IDENTITY_TTL_MS = 3600_000
+const identityCache = new Map<string, { at: number; data: SiteIdentity | null }>()
+async function identityFor(env: Env, hostname: string): Promise<SiteIdentity | null> {
+  const apex = apexHost(hostname)
+  const hit = identityCache.get(apex)
+  if (hit && Date.now() - hit.at < IDENTITY_TTL_MS) return hit.data
+  let data: SiteIdentity | null = null
+  try {
+    const edgeBase = (env.TOPLIST_EDGE ?? DEFAULT_TOPLIST_EDGE).replace(/\/+$/, '')
+    const r = await fetch(edgeBase + '/identity/' + apex + '.json', { cf: { cacheTtl: 3600, cacheEverything: true }, signal: AbortSignal.timeout(1500) })
+    if (r.ok) {
+      const j = await r.json() as SiteIdentity
+      if (j && typeof j === 'object') data = j
+    }
+  } catch { data = null }
+  identityCache.set(apex, { at: Date.now(), data })
+  return data
+}
+// The social profile links a page carries, by the hosts the audit's own
+// social-profiles rule knows; one per platform, the first wins.
+const SOCIAL_HOSTS: Array<[RegExp, string]> = [
+  [/^https?:\/\/(?:www\.)?facebook\.com\/(?!sharer|share|plugins|dialog)[\w.-]+\/?$/i, 'facebook'],
+  [/^https?:\/\/(?:www\.)?(?:twitter|x)\.com\/(?!intent|share|home)[\w]+\/?$/i, 'x'],
+  [/^https?:\/\/(?:www\.)?instagram\.com\/[\w.]+\/?$/i, 'instagram'],
+  [/^https?:\/\/(?:www\.)?linkedin\.com\/(?:company|in)\/[\w-]+\/?$/i, 'linkedin'],
+  [/^https?:\/\/(?:www\.)?youtube\.com\/(?:@[\w]+|channel\/[\w-]+|c\/[\w-]+|user\/[\w-]+)\/?$/i, 'youtube'],
+  [/^https?:\/\/(?:www\.)?tiktok\.com\/@[\w.]+\/?$/i, 'tiktok'],
+  [/^https?:\/\/(?:www\.)?pinterest\.[a-z.]+\/[\w]+\/?$/i, 'pinterest'],
+  [/^https?:\/\/(?:www\.)?threads\.net\/@[\w.]+\/?$/i, 'threads'],
+  [/^https?:\/\/bsky\.app\/profile\/[\w.-]+\/?$/i, 'bluesky'],
+  [/^https?:\/\/(?:www\.)?github\.com\/[\w-]+\/?$/i, 'github'],
+]
+function pageSocials(visible: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const m of visible.matchAll(/<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
+    const href = decodeEntities((m[1] ?? m[2] ?? '').trim())
+    for (const [re, platform] of SOCIAL_HOSTS) {
+      if (!re.test(href) || seen.has(platform)) continue
+      seen.add(platform)
+      out.push(href)
+    }
+  }
+  return out
+}
+
 // ── The page pass ─────────────────────────────────────────────────────────
 function fixPageOff(env: { FIX_PAGE?: string }): boolean {
   return (env.FIX_PAGE ?? '').trim().toLowerCase() === 'off'
@@ -1544,6 +1598,10 @@ interface PagePlan {
   captions: string[]
   headless: boolean[]
   searchPath: string
+  /** The organisation behind the site, as toplist-edge serves it; null when none. */
+  identity: SiteIdentity | null
+  /** The social profile links the page carries. */
+  socials: string[]
 }
 
 // A stylesheet the bundle may take: plain rel="stylesheet", on this site, a
@@ -1612,7 +1670,7 @@ function nameFromClass(cls: string, lang: 'it' | 'fr'): string {
 }
 
 // Everything the rewriter needs to know before it starts, read from the text.
-function planPage(html: string, url: URL, env: Env): PagePlan {
+function planPage(html: string, url: URL, env: Env, identity: SiteIdentity | null = null): PagePlan {
   const origin = url.origin
   // Scripts, comments, templates and SVG are not page content: an img or a
   // link inside them is not the first image and not a trust link.
@@ -1836,6 +1894,7 @@ function planPage(html: string, url: URL, env: Env): PagePlan {
     url, origin, lang, title: head.title, pageUrl, description, ogImage, logo, publisher, contactPath, mail,
     prioritySrc, heroSrc, headExtra: add.join('\n'), skipLink, trustFooter, bundle, bundleTag, labelled, emptyNames,
     titleNames, styleTag, captions, headless, searchPath: SEARCH_PATH[lang],
+    identity, socials: pageSocials(visible),
   }
 }
 
@@ -1868,16 +1927,34 @@ function fixJsonLd(raw: string, p: PagePlan): string | null {
     for (const v of Object.values(n)) if (v && typeof v === 'object') scan(v)
   }
   scan(data)
+  const fill = (n: Record<string, unknown>, k: string, v: unknown) => {
+    if (v && (n[k] === undefined || n[k] === null || n[k] === '')) { n[k] = v; changed = true }
+  }
+  // What the organisation behind the site adds to its node: the researched
+  // facts (identity.ts in Raptor) and the profiles the page links itself.
+  // A field the page already has is kept; sameAs is the union.
+  const id = p.identity
+  const completeOrg = (n: Record<string, unknown>) => {
+    if (id) {
+      fill(n, 'legalName', id.legalName)
+      fill(n, 'vatID', id.vatID)
+      fill(n, 'telephone', id.telephone)
+      fill(n, 'email', id.email)
+      if (id.address && typeof id.address === 'object') fill(n, 'address', id.address)
+    }
+    const have = Array.isArray(n['sameAs']) ? (n['sameAs'] as unknown[]).filter((x): x is string => typeof x === 'string') : typeof n['sameAs'] === 'string' ? [n['sameAs'] as string] : []
+    const want = [...(id?.sameAs ?? []), ...p.socials].filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u) && !have.includes(u))
+    if (want.length) { n['sameAs'] = [...have, ...want.filter((u, i, a) => a.indexOf(u) === i)]; changed = true }
+  }
   const orgRef = (): Record<string, unknown> => {
     if (hasOrg) return { '@id': orgId }
     hasOrg = true
-    return {
-      '@type': 'Organization', '@id': orgId, name: p.publisher, url: p.origin + '/', logo: p.logo,
+    const node: Record<string, unknown> = {
+      '@type': 'Organization', '@id': orgId, name: id?.name || p.publisher, url: p.origin + '/', logo: p.logo,
       contactPoint: { '@type': 'ContactPoint', contactType: 'editorial office', email: p.mail, url: p.origin + p.contactPath },
     }
-  }
-  const fill = (n: Record<string, unknown>, k: string, v: unknown) => {
-    if (v && (n[k] === undefined || n[k] === null || n[k] === '')) { n[k] = v; changed = true }
+    completeOrg(node)
+    return node
   }
   const slug = (s: string) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
   const visit = (node: unknown): void => {
@@ -1896,10 +1973,11 @@ function fixJsonLd(raw: string, p: PagePlan): string | null {
     }
     if (isOrg(t)) {
       fill(n, '@id', orgId)
-      fill(n, 'name', p.publisher)
+      fill(n, 'name', id?.name || p.publisher)
       fill(n, 'url', p.origin + '/')
       fill(n, 'logo', p.logo)
       fill(n, 'contactPoint', { '@type': 'ContactPoint', contactType: 'editorial office', email: p.mail, url: p.origin + p.contactPath })
+      completeOrg(n)
     }
     if (t.includes('website')) {
       fill(n, '@id', p.origin + '/#website')
@@ -2161,8 +2239,11 @@ async function fixPage(response: Response, request: Request, env: Env): Promise<
   if (buf.byteLength === 0) return again(buf)
   let html: string
   try { html = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(buf) } catch { return again(buf) }
+  const pageUrl = new URL(request.url)
+  // The organisation is only read for a page that has JSON-LD to complete.
+  const identity = /application\/ld\+json/i.test(html) ? await identityFor(env, pageUrl.hostname) : null
   let plan: PagePlan
-  try { plan = planPage(html, new URL(request.url), env) } catch { return again(html) }
+  try { plan = planPage(html, pageUrl, env, identity) } catch { return again(html) }
   return applyPlan(plan, again(html))
 }
 
