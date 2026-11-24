@@ -249,8 +249,36 @@ async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: Execut
     }).then(function () { return undefined }, function () { return undefined }))
     return ok
   }
-  let hit: { r?: unknown; s?: unknown; o?: unknown; p?: unknown; x?: unknown } | null = null
+  let hit: { r?: unknown; s?: unknown; o?: unknown; d?: unknown; p?: unknown; x?: unknown; f?: unknown; e?: unknown; t?: unknown; k?: unknown; l?: unknown; c?: unknown; i?: unknown; y?: unknown; q?: unknown } | null = null
   try { hit = await request.json() } catch { hit = null }
+  // The reader-signals ping (k: "x"), sent once as the page is left: field
+  // vitals, scroll depth, clicks on marked elements, scrolls inside tables,
+  // copies, the site-search query. Bounded here as well as at the admin, and
+  // sent on as its own kind so the admin never takes it for a page view.
+  if (hit && hit.k === 'x') {
+    const n = function (v: unknown, max: number): number { return typeof v === 'number' && isFinite(v) && v > 0 ? Math.min(max, Math.round(v)) : 0 }
+    const clicks: Record<string, number> = {}
+    if (hit.e && typeof hit.e === 'object') {
+      const e = hit.e as Record<string, unknown>
+      for (const key of Object.keys(e).slice(0, 20)) {
+        const v = e[key]
+        if (typeof v === 'number' && v > 0) clicks[key.slice(0, 32)] = Math.min(1000, Math.round(v))
+      }
+    }
+    const sigPath = typeof hit.p === 'string' ? hit.p : ''
+    ctx.waitUntil(fetch(admin + '/beacon', {
+      method: 'POST', redirect: 'manual',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': request.headers.get('User-Agent') ?? '', 'X-Beacon-Edge': '1' },
+      body: JSON.stringify({
+        domain: apexHost(url.hostname), k: 'x',
+        path: sigPath.charAt(0) === '/' ? sigPath.split('?')[0].split('#')[0].slice(0, 200) : '',
+        lcp: n(hit.l, 60000), cls_x1000: n(hit.c, 10000), inp: n(hit.i, 60000), scroll: n(hit.s, 100),
+        element_clicks: clicks, table_scrolls: n(hit.t, 1000), copies: n(hit.y, 1000),
+        query: typeof hit.q === 'string' ? hit.q.slice(0, 80) : '',
+      }),
+    }).then(function () { return undefined }, function () { return undefined }))
+    return ok
+  }
   // An automated browser said so itself (navigator.webdriver): a crawler run
   // through a real browser, which the edge signals alone do not catch. Not a
   // view; tallied as excluded so the share is readable.
@@ -324,10 +352,22 @@ async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: Execut
 // for the admin to classify, and s: whether this is the first view of a session,
 // which is the difference between page views and visits. sessionStorage never
 // leaves the browser; when it is blocked the referrer stands in.
+//
+// The second function in the same script element is the reader-signals
+// ping, one extra sendBeacon as the page is left (pagehide or hidden), never
+// on load: LCP, CLS (times a thousand, as an integer) and INP from
+// PerformanceObserver where the browser has them, the deepest scroll as a
+// percentage in steps of ten, clicks on elements carrying data-rf by their
+// value (at most twenty), horizontal scrolls inside .tbl-scroll tables, copy
+// events, and the query when the page is the site search. Every API is
+// guarded and nothing in it can throw into the page; the first function
+// above is untouched and still sends exactly what it sent. The two search
+// paths are written out because this string is built with only the beacon
+// path in scope; the scaffold test holds them to SEARCH_PATH.
 function injectBeacon(response: Response, url: URL, env: { TOPLIST_ADMIN?: string }): Response {
   const ct = response.headers.get('Content-Type') ?? ''
   if (!ct.includes('text/html')) return response
-  const s = '<script>(function(){try{var SE="|google|bing|duckduckgo|yahoo|ecosia|qwant|startpage|brave|yandex|baidu|seznam|naver|mojeek|lycos|";function se(h){var a=String(h||"").toLowerCase().split(".");for(var i=0;i<a.length;i++){if(SE.indexOf("|"+a[i]+"|")>=0)return 1}return 0}var v=1,c="";try{c=sessionStorage.getItem("_o")||"";if(sessionStorage.getItem("_s"))v=0;else sessionStorage.setItem("_s","1")}catch(e){v=document.referrer.indexOf(location.host)<0?1:0}var dv="d";try{var ua=(navigator.userAgent||"").toLowerCase();var uad=navigator.userAgentData;dv=(uad&&uad.mobile===true)?"m":(ua.indexOf("ipad")>=0||(ua.indexOf("android")>=0&&ua.indexOf("mobi")<0))?"t":(ua.indexOf("mobi")>=0||ua.indexOf("iphone")>=0||ua.indexOf("android")>=0)?"m":"d"}catch(e5){dv="d"}if(!c){var r=document.referrer||"",rh="";try{rh=r?new URL(r).hostname:""}catch(e2){rh=""}var qs=(location.search||"").toLowerCase();var pd=qs.indexOf("gclid=")>=0||qs.indexOf("msclkid=")>=0||qs.indexOf("fbclid=")>=0||qs.indexOf("utm_medium=cpc")>=0;c=pd?"p":!rh?"d":(rh===location.hostname||rh==="www."+location.hostname||"www."+rh===location.hostname)?"i":se(rh)?"o":"r";try{sessionStorage.setItem("_o",c)}catch(e3){}}var sig=0,t0=Date.now();function mark(bt){return function(){sig=sig|bt}}var po={passive:true,capture:true};document.addEventListener("pointermove",mark(1),po);document.addEventListener("touchstart",mark(1),po);document.addEventListener("scroll",mark(2),po);document.addEventListener("wheel",mark(2),po);document.addEventListener("keydown",mark(4),po);function dwell(){return Math.min(3600,Math.round((Date.now()-t0)/1000))}function stamp(ev){try{var a=ev.target;a=(a&&a.closest)?a.closest("a"):null;if(!a)return;var h=a.getAttribute("href")||"";if(h.indexOf("/vai/")!==0&&h.indexOf("/aller/")!==0&&h.indexOf("/go/")!==0)return;if(h.indexOf("s=")>=0)return;var sg=sig|((ev&&ev.isTrusted)?8:0);a.setAttribute("href",h+(h.indexOf("?")>=0?"&":"?")+"s="+c+"&dev="+dv+"&e="+sg+"&t="+dwell());}catch(e4){}}document.addEventListener("click",stamp,true);document.addEventListener("auxclick",stamp,true);if(navigator.webdriver){navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([JSON.stringify({x:"wd"})],{type:"text/plain"}));return}var p=JSON.stringify({r:document.referrer||"",s:v,o:c,d:dv,p:location.pathname});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([p],{type:"text/plain"}));var done=0;function bye(){if(done)return;done=1;try{var q=JSON.stringify({f:1,o:c,d:dv,e:sig,t:dwell(),p:location.pathname});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([q],{type:"text/plain"}))}catch(e6){}}document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden")bye()},true);if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("pagehide",bye,true);}catch(e){}try{var bars=document.querySelectorAll("a[class*=-sbar]");if(bars.length&&matchMedia("(max-width:640px)").matches){var pin=function(){for(var i=0;i<bars.length;i++){var bar=bars[i],w=bar.parentElement,rc=w.getBoundingClientRect(),on=rc.top<innerHeight-120&&rc.bottom>innerHeight+40;bar.style.position=on?"fixed":"";bar.style.left=on?"16px":"";bar.style.right=on?"16px":"";bar.style.bottom=on?"10px":"";bar.style.zIndex=on?"99":""}};addEventListener("scroll",pin,{passive:true});addEventListener("resize",pin,{passive:true});addEventListener("load",pin);pin();setTimeout(pin,800);setTimeout(pin,2500)}}catch(e7){}})();</script>'
+  const s = '<script>(function(){try{var SE="|google|bing|duckduckgo|yahoo|ecosia|qwant|startpage|brave|yandex|baidu|seznam|naver|mojeek|lycos|";function se(h){var a=String(h||"").toLowerCase().split(".");for(var i=0;i<a.length;i++){if(SE.indexOf("|"+a[i]+"|")>=0)return 1}return 0}var v=1,c="";try{c=sessionStorage.getItem("_o")||"";if(sessionStorage.getItem("_s"))v=0;else sessionStorage.setItem("_s","1")}catch(e){v=document.referrer.indexOf(location.host)<0?1:0}var dv="d";try{var ua=(navigator.userAgent||"").toLowerCase();var uad=navigator.userAgentData;dv=(uad&&uad.mobile===true)?"m":(ua.indexOf("ipad")>=0||(ua.indexOf("android")>=0&&ua.indexOf("mobi")<0))?"t":(ua.indexOf("mobi")>=0||ua.indexOf("iphone")>=0||ua.indexOf("android")>=0)?"m":"d"}catch(e5){dv="d"}if(!c){var r=document.referrer||"",rh="";try{rh=r?new URL(r).hostname:""}catch(e2){rh=""}var qs=(location.search||"").toLowerCase();var pd=qs.indexOf("gclid=")>=0||qs.indexOf("msclkid=")>=0||qs.indexOf("fbclid=")>=0||qs.indexOf("utm_medium=cpc")>=0;c=pd?"p":!rh?"d":(rh===location.hostname||rh==="www."+location.hostname||"www."+rh===location.hostname)?"i":se(rh)?"o":"r";try{sessionStorage.setItem("_o",c)}catch(e3){}}var sig=0,t0=Date.now();function mark(bt){return function(){sig=sig|bt}}var po={passive:true,capture:true};document.addEventListener("pointermove",mark(1),po);document.addEventListener("touchstart",mark(1),po);document.addEventListener("scroll",mark(2),po);document.addEventListener("wheel",mark(2),po);document.addEventListener("keydown",mark(4),po);function dwell(){return Math.min(3600,Math.round((Date.now()-t0)/1000))}function stamp(ev){try{var a=ev.target;a=(a&&a.closest)?a.closest("a"):null;if(!a)return;var h=a.getAttribute("href")||"";if(h.indexOf("/vai/")!==0&&h.indexOf("/aller/")!==0&&h.indexOf("/go/")!==0)return;if(h.indexOf("s=")>=0)return;var sg=sig|((ev&&ev.isTrusted)?8:0);a.setAttribute("href",h+(h.indexOf("?")>=0?"&":"?")+"s="+c+"&dev="+dv+"&e="+sg+"&t="+dwell());}catch(e4){}}document.addEventListener("click",stamp,true);document.addEventListener("auxclick",stamp,true);if(navigator.webdriver){navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([JSON.stringify({x:"wd"})],{type:"text/plain"}));return}var p=JSON.stringify({r:document.referrer||"",s:v,o:c,d:dv,p:location.pathname});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([p],{type:"text/plain"}));var done=0;function bye(){if(done)return;done=1;try{var q=JSON.stringify({f:1,o:c,d:dv,e:sig,t:dwell(),p:location.pathname});navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([q],{type:"text/plain"}))}catch(e6){}}document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden")bye()},true);if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("pagehide",bye,true);}catch(e){}try{var bars=document.querySelectorAll("a[class*=-sbar]");if(bars.length&&matchMedia("(max-width:640px)").matches){var pin=function(){for(var i=0;i<bars.length;i++){var bar=bars[i],w=bar.parentElement,rc=w.getBoundingClientRect(),on=rc.top<innerHeight-120&&rc.bottom>innerHeight+40;bar.style.position=on?"fixed":"";bar.style.left=on?"16px":"";bar.style.right=on?"16px":"";bar.style.bottom=on?"10px":"";bar.style.zIndex=on?"99":""}};addEventListener("scroll",pin,{passive:true});addEventListener("resize",pin,{passive:true});addEventListener("load",pin);pin();setTimeout(pin,800);setTimeout(pin,2500)}}catch(e7){}})();(function(){try{if(navigator.webdriver)return;var L=0,C=0,I=0,S=0,K={},KN=0,T=0,Y=0,Q="";try{new PerformanceObserver(function(l){var e=l.getEntries();if(e.length)L=e[e.length-1].startTime}).observe({type:"largest-contentful-paint",buffered:true})}catch(x1){}try{new PerformanceObserver(function(l){var e=l.getEntries();for(var i=0;i<e.length;i++){if(!e[i].hadRecentInput)C+=e[i].value}}).observe({type:"layout-shift",buffered:true})}catch(x2){}try{new PerformanceObserver(function(l){var e=l.getEntries();for(var i=0;i<e.length;i++){if(e[i].interactionId&&e[i].duration>I)I=e[i].duration}}).observe({type:"event",buffered:true,durationThreshold:40})}catch(x3){}function sd(){try{var d=document.documentElement,h=(d.scrollHeight||0)-(window.innerHeight||0),p=h>0?Math.round(100*(window.scrollY||0)/h):100;if(p>S)S=p>100?100:p}catch(x4){}}try{sd();window.addEventListener("scroll",sd,{passive:true})}catch(x5){}try{document.addEventListener("click",function(ev){try{var t=ev.target,a=(t&&t.closest)?t.closest("[data-rf]"):null;if(!a)return;var k=String(a.getAttribute("data-rf")||"").slice(0,32);if(!k)return;if(!K[k]){if(KN>=20)return;KN++;K[k]=0}K[k]++}catch(x6){}},true)}catch(x7){}try{document.addEventListener("scroll",function(ev){try{var t=ev.target;if(!t||!t.classList||!t.classList.contains("tbl-scroll"))return;var x=t.scrollLeft||0;if(x!==(t.__rx||0)){t.__rx=x;T++}}catch(x8){}},true)}catch(x9){}try{document.addEventListener("copy",function(){Y++},true)}catch(x10){}try{if(location.pathname==="/cerca"||location.pathname==="/recherche"){var qs=(location.search||"").slice(1).split("&");for(var j=0;j<qs.length;j++){var kv=qs[j].split("=");if(kv[0]==="q"){Q=decodeURIComponent((kv[1]||"").split("+").join(" ")).toLowerCase().slice(0,80);break}}}}catch(x11){}var done=0;function bye(){if(done)return;done=1;try{sd();var o={k:"x",p:location.pathname,l:Math.round(L),c:Math.round(C*1000),i:Math.round(I),s:Math.round(S/10)*10,t:T,y:Y};if(KN)o.e=K;if(Q)o.q=Q;navigator.sendBeacon("' + beaconPath(url.hostname) + '",new Blob([JSON.stringify(o)],{type:"text/plain"}))}catch(x12){}}document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden")bye()},true);if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("pagehide",bye,true)}catch(x0){}})();</script>'
   return new HTMLRewriter().on('body', { element(el) { el.append(s, { html: true }) } }).transform(response)
 }
 
@@ -1701,6 +1741,150 @@ interface PagePlan {
   socials: string[]
   /** Width and height per image src, read from the files, for the img tags that lack them. */
   dims: Map<string, [number, number]>
+  /** The table of contents to put after the first paragraph under the H1 ('' = none),
+   *  and the id each H2 gets, by its index among the document's H2s. */
+  toc: string
+  tocIds: Map<number, string>
+  /** The phone call-to-action bar and its script ('' = no toplist on the page),
+   *  and the id the toplist mount gets when it has none. */
+  cta: string
+  toplistId: string
+}
+
+// ── The edge pass: breadcrumbs, contents, the phone bar ───────────────────
+// Everything below reads the page as text in planPage and is written by the
+// rewriter in applyPlan, like the rest of the fixes. Each is deterministic
+// from the page alone: no fetch, no clock, no randomness, so two renders of
+// one page are one page.
+const TOC_CSS = '.rp-toc{margin:1rem 0;font-size:16px;line-height:1.5}.rp-toc summary{cursor:pointer;font-weight:600;min-height:24px;padding:.25rem 0}.rp-toc ol{margin:.5rem 0 0;padding-left:1.25rem}.rp-toc li{margin:.25rem 0}.rp-toc a{min-height:24px;display:inline-block}'
+// Shown only on a phone, only once the script lifts the hidden attribute:
+// the desktop and tablet test of the same bar lost, and a bar that paints
+// before the reader has scrolled is an interstitial.
+const CTA_CSS = '.rp-cta{display:none}@media (max-width:759px){.rp-cta:not([hidden]){display:block;position:fixed;left:16px;right:16px;bottom:10px;z-index:98;min-height:48px;line-height:48px;text-align:center;background:#1d4ed8;color:#fff;font:600 16px/48px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border-radius:8px;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.25)}}'
+const TOC_WORDS: Record<'it' | 'fr', string> = { it: 'Indice', fr: 'Sommaire' }
+const CTA_WORDS: Record<'it' | 'fr', string> = { it: 'Vedi la classifica', fr: 'Voir le classement' }
+const TOPLIST_ANCHOR: Record<'it' | 'fr', string> = { it: 'classifica', fr: 'classement' }
+const TOC_MIN_H2 = 6
+const TOC_MIN_WORDS = 1500
+
+// A fragment id from a heading's text: ASCII letters and digits, hyphens
+// between, accents dropped ("Metodi di pagamento" is "metodi-di-pagamento").
+function slugId(s: string): string {
+  return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
+}
+// A path segment as a name, when nothing on the page names it:
+// "bonus-senza-deposito" is "Bonus senza deposito".
+function nameFromSegment(seg: string): string {
+  let s = seg
+  try { s = decodeURIComponent(seg) } catch { /* as written */ }
+  s = s.replace(/\.(html?|php|aspx?)$/i, '').replace(/[-_+]+/g, ' ').trim()
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''
+}
+// Every link inside a <nav>, in document order, as [path, text]: the page's
+// own names for its sections, read for the breadcrumb and the prefetch list.
+// Same-origin pages only; never an affiliate redirect, a fragment or a file.
+function navPageLinks(visible: string, base: URL): Array<[string, string]> {
+  const out: Array<[string, string]> = []
+  for (const nav of visible.matchAll(/<nav\b[^>]*>([\s\S]*?)<\/nav\s*>/gi)) {
+    for (const m of nav[1].matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi)) {
+      const a = parseAttrs('<a' + m[1] + '>')
+      const path = sameOriginPath(a.href ?? '', base)
+      if (!path || path.indexOf('/vai/') === 0 || path.indexOf('/aller/') === 0 || path.indexOf('/go/') === 0 || NOT_FOUND_ASSET_RE.test(path)) continue
+      const text = stripTags(m[2]) || decodeEntities(a['aria-label'] ?? a.title ?? '').trim()
+      out.push([path, text])
+    }
+  }
+  return out
+}
+// The breadcrumb trail as JSON-LD, from the path: home, each section, the
+// page. Names come from the page where it has them (the nav's text for a
+// section, the H1 for the page), else from the segment. Nothing on the home
+// page, which has no trail, and nothing where the page already declares one.
+function breadcrumbLd(url: URL, pageUrl: string, h1: string, publisher: string, nav: Array<[string, string]>): string {
+  const segs = url.pathname.split('/').filter((s) => s !== '')
+  if (segs.length === 0) return ''
+  const same = (p: string) => p.replace(/\/+$/, '').replace(/\/index\.html?$/i, '')
+  const nameFor = (path: string): string => {
+    const want = same(path)
+    for (const [p, text] of nav) if (text && same(p) === want) return text
+    return ''
+  }
+  const items: Array<{ name: string; item: string }> = [{ name: nameFor('/') || publisher, item: url.origin + '/' }]
+  for (let i = 0; i < segs.length; i++) {
+    const last = i === segs.length - 1
+    const path = '/' + segs.slice(0, i + 1).join('/') + (last && /\.[a-z0-9]+$/i.test(segs[i]) ? '' : '/')
+    const name = (last && h1) || nameFor(path) || nameFromSegment(segs[i])
+    if (!name) return ''
+    items.push({ name, item: last ? pageUrl : url.origin + path })
+  }
+  const ld = {
+    '@context': 'https://schema.org', '@type': 'BreadcrumbList',
+    itemListElement: items.map((it, i) => ({ '@type': 'ListItem', position: i + 1, name: it.name, item: it.item })),
+  }
+  return '<script type="application/ld+json">' + JSON.stringify(ld).replace(/<\//g, '<\\/') + '</script>'
+}
+// The table of contents for a long guide: six or more H2 inside the main
+// content and fifteen hundred words of it. Shorter pages get none, because a
+// contents box pushes the content below the fold. Each H2 keeps its id or
+// gets one from its text; the ids are decided here and set by the rewriter,
+// by the heading's index among every H2 the rewriter will see, so the counts
+// must agree (an H2 inside a template or an svg means no contents at all).
+function planToc(visible: string, rewritten: string, lang: 'it' | 'fr'): { html: string; ids: Map<number, string> } | null {
+  const h2Re = /<h2\b([^>]*)>([\s\S]*?)<\/h2\s*>/gi
+  if (count(visible, /<h2\b/gi) !== count(rewritten, /<h2\b/gi)) return null
+  const region = /<(main|article)\b[^>]*>[\s\S]*?<\/\1\s*>/i.exec(visible)
+  if (!region) return null
+  const start = region.index, end = start + region[0].length
+  const words = count(stripTags(region[0]), /\S+/g)
+  if (words < TOC_MIN_WORDS) return null
+  // After the H1, a paragraph: the box goes after it, so without one there is
+  // nowhere to put it.
+  const h1At = visible.search(/<h1\b/i)
+  if (h1At < 0 || visible.slice(h1At).search(/<p\b/i) < 0) return null
+  const taken = new Set<string>()
+  for (const m of visible.matchAll(/\bid\s*=\s*["']([^"']+)["']/gi)) taken.add(m[1])
+  const ids = new Map<number, string>()
+  const entries: string[] = []
+  let idx = -1
+  for (const m of visible.matchAll(h2Re)) {
+    idx++
+    const at = m.index ?? 0
+    if (at < start || at > end) continue
+    const text = stripTags(m[2])
+    if (!text) continue
+    const own = parseAttrs('<h2' + m[1] + '>').id
+    let id = own || slugId(text) || 'sezione-' + (idx + 1)
+    if (!own) { let n = 2; const base = id; while (taken.has(id)) id = base + '-' + n++; taken.add(id); ids.set(idx, id) }
+    entries.push('<li><a href="#' + escAttr(id) + '">' + escAttr(text) + '</a></li>')
+  }
+  if (entries.length < TOC_MIN_H2) return null
+  const word = TOC_WORDS[lang]
+  // Closed by default, so on a phone it is one line; opened on a wide screen
+  // by the one statement below (a details element cannot be opened from CSS).
+  const html = '<nav class="rp-toc" aria-label="' + word + '"><details><summary>' + word + '</summary><ol>' + entries.join('') + '</ol></details></nav>'
+    + '<script>try{if(matchMedia("(min-width:760px)").matches)document.querySelector(".rp-toc details").open=true}catch(e){}</script>'
+  return { html, ids }
+}
+// The phone bar: a link to the toplist's anchor, never to an operator, shown
+// once the reader is 40% down the page and the toplist is not on screen, and
+// never over the trust footer. The attribute data-rf names it to the beacon
+// so its clicks are counted as its own. Hidden by attribute until the script
+// says otherwise; CTA_CSS keeps it off every screen 760px and wider.
+function ctaHtml(lang: 'it' | 'fr', anchor: string): string {
+  return '<a class="rp-cta" data-rf="sticky-cta" href="#' + escAttr(anchor) + '" hidden>' + CTA_WORDS[lang] + '</a>'
+    + '<script>(function(){try{var a=document.querySelector(".rp-cta"),m=document.getElementById("' + escAttr(anchor) + '"),f=document.querySelector("footer.rp-trust");if(!a||!m)return;var on=0;function u(){try{var h=document.documentElement.scrollHeight-innerHeight,p=h>0?(scrollY||0)/h:1,r=m.getBoundingClientRect(),v=r.bottom>0&&r.top<innerHeight,ft=f?f.getBoundingClientRect().top<innerHeight:false,s=p>=.4&&!v&&!ft;if(s!==on){on=s;if(s)a.removeAttribute("hidden");else a.setAttribute("hidden","")}}catch(e){}}addEventListener("scroll",u,{passive:true});addEventListener("resize",u,{passive:true});u()}catch(e){}})();</script>'
+}
+// Up to two pages from the main navigation for the browser to prefetch: the
+// first two internal links of the first <nav>, not this page, no duplicates.
+function speculationRules(nav: Array<[string, string]>, url: URL): string {
+  const urls: string[] = []
+  for (const [p] of nav) {
+    if (p === url.pathname || p.replace(/\/+$/, '') === url.pathname.replace(/\/+$/, '') || urls.includes(p)) continue
+    urls.push(p)
+    if (urls.length === 2) break
+  }
+  if (!urls.length) return ''
+  return '<script type="speculationrules">' + JSON.stringify({ prefetch: [{ source: 'list', urls }] }).replace(/<\//g, '<\\/') + '</script>'
 }
 
 // A stylesheet the bundle may take: plain rel="stylesheet", on this site, a
@@ -1825,7 +2009,9 @@ function planPage(html: string, url: URL, env: Env, identity: SiteIdentity | nul
     const hint = src + ' ' + (a.class ?? '') + ' ' + (a.id ?? '') + ' ' + (a.alt ?? '')
     if ((w > 0 && w <= 2) || (h > 0 && h <= 2) || /pixel|tracking|spacer|blank|1x1/i.test(hint)) continue
     const isLogo = inHeader || /logo|icon|badge/i.test(hint)
-    if (!heroSrc && !isLogo) heroSrc = src
+    // An image the author lazy-loads is not the one painting first: the
+    // priority goes to the first content image that is not lazy.
+    if (!heroSrc && !isLogo && (a.loading ?? '').trim().toLowerCase() !== 'lazy') heroSrc = src
     let path = ''
     try { path = new URL(src, url).pathname } catch { path = '' }
     if (/^\/_[a-z0-9]{6}\//.test(path)) continue
@@ -1983,6 +2169,40 @@ function planPage(html: string, url: URL, env: Env, identity: SiteIdentity | nul
   if (trustFooter) add.push('<style>' + TRUST_CSS + '</style>')
   if (captions.some((c) => c !== '')) add.push('<style>' + SR_CSS + '</style>')
 
+  // The edge pass. Breadcrumbs and the prefetch list read the navigation;
+  // the H1 names the page in the trail.
+  const nav = navPageLinks(visible, url)
+  const h1 = stripTags(/<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/i.exec(visible)?.[1] ?? '')
+  const crumbs = /BreadcrumbList/i.test(html) ? '' : breadcrumbLd(url, pageUrl, h1, publisher, nav)
+  if (crumbs) add.push(crumbs)
+  const rules = /type\s*=\s*["']?speculationrules/i.test(html) ? '' : speculationRules(nav, url)
+  if (rules) add.push(rules)
+  // A preconnect to toplist-edge only where the browser will go there: the
+  // list is rendered server-side and logos come through this site's own
+  // path, so on most pages nothing connects to it, and printing the shared
+  // edge hostname into every page of the network is the one footprint the
+  // beacon's history warns against. A page that already loads something
+  // from it has made that choice, and the connection is then worth opening.
+  let edgeHost = ''
+  try { edgeHost = new URL(edgeBase).hostname } catch { edgeHost = '' }
+  let loadsEdge = false, preconnected = false
+  for (const m of visible.matchAll(/<(?:img|script|link|iframe|source|video|audio)\b[^>]*>/gi)) {
+    const a = parseAttrs(m[0])
+    let h = ''
+    try { h = new URL((a.src ?? a.href ?? '').trim(), url).hostname } catch { h = '' }
+    if (!edgeHost || h !== edgeHost) continue
+    if (relTokens(a.rel ?? null).includes('preconnect')) preconnected = true
+    else loadsEdge = true
+  }
+  if (loadsEdge && !preconnected) add.push('<link rel="preconnect" href="' + escAttr(edgeBase) + '">')
+  const tocPlan = planToc(visible, rewritten, lang)
+  if (tocPlan) add.push('<style>' + TOC_CSS + '</style>')
+  // The toplist mount, by its id or the one the rewriter will give it.
+  const mountTag = /<[a-z][a-z0-9-]*\b[^>]*\bdata-toplist\b[^>]*>/i.exec(visible)?.[0] ?? ''
+  const mountId = mountTag ? (parseAttrs(mountTag).id || TOPLIST_ANCHOR[lang]) : ''
+  const cta = mountId ? ctaHtml(lang, mountId) : ''
+  if (cta) add.push('<style>' + CTA_CSS + '</style>')
+
   const bundle = sheets.length >= 2 ? sheets : []
   const joined = bundle.join(',')
   const bundleTag = bundle.length
@@ -1994,6 +2214,7 @@ function planPage(html: string, url: URL, env: Env, identity: SiteIdentity | nul
     prioritySrc, heroSrc, headExtra: add.join('\n'), skipLink, trustFooter, bundle, bundleTag, labelled, emptyNames,
     titleNames, styleTag, captions, headless, searchPath: SEARCH_PATH[lang],
     identity, socials: pageSocials(visible), dims,
+    toc: tocPlan?.html ?? '', tocIds: tocPlan?.ids ?? new Map(), cta, toplistId: mountTag && !parseAttrs(mountTag).id ? mountId : '',
   }
 }
 
@@ -2320,15 +2541,134 @@ function applyPlan(p: PagePlan, response: Response): Response {
       },
     })
   }
-  if (p.skipLink || p.trustFooter) {
+  // The edge pass. Each H2 the contents list names gets its id by its index
+  // among every H2 the rewriter meets, which planToc made sure is the index
+  // the text pass counted. The contents box goes after the end tag of the
+  // first paragraph following the H1.
+  if (p.toc) {
+    let h2Idx = -1, h1Seen = false, tocDone = false
+    rw.on('h2', {
+      element(el) {
+        h2Idx++
+        const id = p.tocIds.get(h2Idx)
+        if (id && !el.hasAttribute('id')) el.setAttribute('id', id)
+      },
+    })
+    rw.on('h1', { element() { h1Seen = true } })
+    rw.on('p', {
+      element(el) {
+        if (!h1Seen || tocDone) return
+        tocDone = true
+        el.after(p.toc, { html: true })
+      },
+    })
+  }
+  if (p.toplistId) {
+    let mountDone = false
+    rw.on('[data-toplist]', {
+      element(el) {
+        if (mountDone) return
+        mountDone = true
+        if (!el.hasAttribute('id')) el.setAttribute('id', p.toplistId)
+      },
+    })
+  }
+  if (p.rgLine) {
+    let rgDone = false
+    rw.on('footer.rp-trust', {
+      element(el) {
+        if (rgDone) return
+        rgDone = true
+        el.append(p.rgLine, { html: true })
+      },
+    })
+  }
+  if (p.skipLink || p.trustFooter || p.cta) {
     rw.on('body', {
       element(el) {
         if (p.skipLink) el.prepend(p.skipLink, { html: true })
         if (p.trustFooter) el.append(p.trustFooter, { html: true })
+        // After the footer, so the bar's script finds it on the page.
+        if (p.cta) el.append(p.cta, { html: true })
       },
     })
   }
   return rw.transform(response)
+}
+
+// ── robots.txt and the 404 page at the edge ───────────────────────────────
+// Cloudflare's Content Signals, so the pages stay citable in AI answers while
+// training on them is refused: served on every site whether or not its
+// robots.txt was written before the directive existed. A file with the line
+// already is served as written; a file without gets the line inside its
+// "User-agent: *" group with every rule it had intact (no Allow: / is added
+// to a group that has its own rules: beside a Disallow: / it would win, and
+// unblock a site blocked on purpose), and a Sitemap line if it had none. A
+// site with no robots.txt at all gets the scaffold's.
+const CONTENT_SIGNAL = 'Content-Signal: search=yes, ai-train=no, ai-input=yes'
+function robotsWithSignals(existing: string, origin: string): string {
+  const lines = existing.replace(/\r/g, '').split('\n')
+  while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+  const star = lines.findIndex((l) => /^\s*user-agent:\s*\*\s*$/i.test(l))
+  if (star >= 0) lines.splice(star + 1, 0, CONTENT_SIGNAL)
+  else lines.push(...(lines.length ? [''] : []), 'User-agent: *', CONTENT_SIGNAL, 'Allow: /', 'Disallow: /api/toplist/', 'Disallow: /go/', 'Disallow: /vai/', 'Disallow: /aller/')
+  if (!lines.some((l) => /^\s*sitemap:/i.test(l))) lines.push('', 'Sitemap: ' + origin + '/sitemap.xml')
+  return lines.join('\n') + '\n'
+}
+async function handleRobots(request: Request, url: URL, env: Env): Promise<Response> {
+  let existing = ''
+  try {
+    const r = await env.ASSETS.fetch(request)
+    if (r.ok) existing = await r.text()
+  } catch { existing = '' }
+  const body = /^\s*content-signal:/im.test(existing) ? existing : robotsWithSignals(existing, url.origin)
+  const headers = new Headers({ 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=3600' })
+  return withSecurityHeaders(new Response(request.method === 'HEAD' ? null : body, { status: 200, headers }))
+}
+
+// The page for an address with nothing behind it, on a site with no 404.html
+// of its own. The assets answer a bare 404 then (not_found_handling is
+// "404-page", and with no page to serve the body is empty): this is status
+// 404, noindex, in the site's language, named after the site from its home
+// title (one assets read, kept an hour per isolate) and linking home. A
+// site's own 404.html is served exactly as it is, and a missing file (a
+// stylesheet, an image, anything under /api/ or /.well-known/) stays the bare
+// 404 it was: a broken image must not come back as a page.
+const HOME_TITLE_TTL_MS = 3600_000
+const homeTitleCache = new Map<string, { at: number; title: string }>()
+async function siteTitle(url: URL, env: Env): Promise<string> {
+  const host = apexHost(url.hostname)
+  const hit = homeTitleCache.get(host)
+  if (hit && Date.now() - hit.at < HOME_TITLE_TTL_MS) return hit.title
+  let title = ''
+  try {
+    const home = await env.ASSETS.fetch(new Request(url.origin + '/'))
+    if (home.ok && (home.headers.get('Content-Type') ?? '').includes('text/html')) title = readHeadMeta(await home.text()).title
+  } catch { title = '' }
+  homeTitleCache.set(host, { at: Date.now(), title })
+  return title
+}
+function notFoundIsPage(url: URL, method: string, asset: Response): boolean {
+  if (method !== 'GET' && method !== 'HEAD') return false
+  if ((asset.headers.get('Content-Type') ?? '').includes('text/html')) return false
+  const path = url.pathname
+  return !NOT_FOUND_ASSET_RE.test(path) && path.indexOf('/.well-known/') !== 0 && path.indexOf('/api/') !== 0
+}
+async function handleNotFound(url: URL, env: Env, method: string): Promise<Response> {
+  const lang: 'it' | 'fr' = detectCountry(env, url.hostname) === 'FR' ? 'fr' : 'it'
+  const name = escAttr((await siteTitle(url, env)) || apexHost(url.hostname))
+  const copy = lang === 'fr'
+    ? { head: 'Page introuvable', body: "Cette page n'existe pas ou n'existe plus.", home: "Retour à l'accueil" }
+    : { head: 'Pagina non trovata', body: 'La pagina che cerchi non esiste o non esiste più.', home: 'Torna alla home' }
+  const html = '<!doctype html><html lang="' + lang + '"><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<meta name="robots" content="noindex,nofollow">'
+    + '<title>' + copy.head + ' – ' + name + '</title>'
+    + '<style>' + TRUST_PAGE_CSS + 'main{text-align:center;padding-top:4rem}.rp-code{font-size:4rem;font-weight:800;color:#9ca3af;line-height:1;margin:0}</style></head>'
+    + '<body><main id="main"><p class="rp-home"><a href="/">' + name + '</a></p><p class="rp-code">404</p><h1>' + copy.head + '</h1><p>' + copy.body + '</p>'
+    + '<p><a href="/">' + copy.home + '</a></p></main></body></html>'
+  const headers = new Headers({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=300', 'X-Robots-Tag': 'noindex, nofollow' })
+  return withSecurityHeaders(new Response(method === 'HEAD' ? null : html, { status: 404, headers }))
 }
 
 // Every 200 HTML page goes through here, after the toplist is in and before
@@ -2436,6 +2776,12 @@ export default {
       if (env.SITEMAP_AUTO !== 'off') return handleSitemap(url, env)
     }
 
+    // robots.txt with the Content Signals line, whatever the site's file
+    // says; see handleRobots.
+    if (url.pathname === '/robots.txt' && (request.method === 'GET' || request.method === 'HEAD')) {
+      return handleRobots(request, url, env)
+    }
+
     // Per-site logo proxy. Path shape: /_<6alphanum>/<slug>
     // The prefix is computed from the site's own domain so two EMD sites
     // never expose an identical logo URL (no image footprint).
@@ -2481,6 +2827,12 @@ export default {
             status: 301,
             headers: { Location: sendTo, 'Cache-Control': 'public, max-age=3600' },
           }))
+        }
+        // Nothing behind a page address and no 404.html on the site: the
+        // branded page, status 404. A site's own 404.html and a missing file
+        // pass through as they are. See handleNotFound.
+        if (notFoundIsPage(url, request.method, assetResponse)) {
+          return handleNotFound(url, env, request.method)
         }
       }
       const withCss = await fixCssResponse(assetResponse, env)
