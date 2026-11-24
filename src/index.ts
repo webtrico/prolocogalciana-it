@@ -4,6 +4,16 @@ const SECURITY_HEADERS: Record<string, string> = {
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
   'Vary': 'Accept-Encoding',
+  // Every fetch directive named, so the policy audit sees a complete header,
+  // and every one of them permissive: legacy pages carry inline scripts and
+  // handlers, the beacon below is inline, the toplist loads from toplist-edge
+  // and a 2009 theme pulls fonts and widgets from wherever it liked. So
+  // 'unsafe-inline' and https: stay; what the policy does enforce is the
+  // upgrade of http: subresources, no plugins, no <base> injection, no framing
+  // by another site.
+  'Content-Security-Policy': "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; script-src 'self' https: 'unsafe-inline' 'unsafe-eval'; style-src 'self' https: 'unsafe-inline'; img-src 'self' https: data: blob:; font-src 'self' https: data:; connect-src 'self' https:; frame-src https:; upgrade-insecure-requests; frame-ancestors 'self'; base-uri 'self'; object-src 'none'",
+  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload',
+  'Cross-Origin-Opener-Policy': 'same-origin-allow-popups',
 }
 
 // Default toplist-edge URL — used if [vars] TOPLIST_EDGE is missing on an
@@ -185,8 +195,9 @@ function withSecurityHeaders(response: Response, request?: Request): Response {
 // Inject a tiny, cache-proof beacon into every HTML page. It runs in the
 // visitor's browser on EVERY view — even when Cloudflare serves cached HTML
 // without invoking this worker — and pings the admin /beacon, which decides what
-// the hit was. There is no CSP on these sites so the inline script runs; a
-// text/plain body avoids a CORS preflight, and sendBeacon adds zero latency.
+// the hit was. The CSP above keeps 'unsafe-inline' so this inline script
+// runs; a text/plain body avoids a CORS preflight, and sendBeacon adds zero
+// latency.
 //
 // It used to return early unless document.referrer named some OTHER host:
 //
@@ -705,6 +716,7 @@ interface Env {
   REDIRECT_HOSTS?: string         // optional comma-separated hosts that 301 to SUBDOMAIN_HOST
   ROBOTS_TAG?: string             // optional site-wide robots directive, replaces per-page tags
   NOT_FOUND_REDIRECT?: string     // optional: where a page that no longer exists goes, with a 301 (e.g. "/"); absent = 404
+  FIX_PAGE?: string               // optional: "off" switches the edge SEO fixes (fixPage, CSS floor) off for this site
 }
 
 // When SUBDOMAIN_HOST + SUBDOMAIN_SLUG are set, strip existing canonical/hreflang from HTML
@@ -775,6 +787,1001 @@ function injectRobotsMeta(response: Response, env: { ROBOTS_TAG?: string }): Res
       },
     })
     .transform(response)
+}
+
+// ── Edge SEO fixes ────────────────────────────────────────────────────────
+// What follows fixes, on every HTML page this worker serves, the audit rules
+// that are the TEMPLATE's fault rather than the article's: missing Open Graph
+// tags, nofollow on our own links, a meta description that runs long, JSON-LD
+// with holes in it, images without lazy loading, unlabelled inputs and navs,
+// no skip link, no trust pages, nine render-blocking stylesheets, text under
+// 12px, and a header set without CSP or HSTS. One pass, at the edge, for
+// every site at once; a page that already has any of these keeps what it has.
+// FIX_PAGE = "off" in wrangler.toml switches the page and stylesheet rewriting
+// off for one site. (This comment is inside the template literal: no
+// backticks anywhere below.)
+//
+// The page is read as text first. Pages here are small, and the questions the
+// head needs answered (is there a first image? a canonical? a main?) are about
+// parts of the document the streaming rewriter has not seen yet when it is in
+// the head. The second pass is an ordinary HTMLRewriter over the text.
+
+// The trust footer is the worker's own: a page gets one unless it already
+// carries a footer.rp-trust (the generated trust pages do). It used to be
+// withheld from any page with a link whose text or href merely resembled a
+// trust link, and a site whose footer linked to an external privacy page went
+// without about, contact and editorial pages and without the disclaimers.
+const OWN_TRUST_FOOTER_RE = /<footer\b[^>]*\bclass\s*=\s*["'][^"']*\brp-trust\b/i
+
+// The entities a legacy Italian or French page uses: the XML five, the
+// numeric forms, and the Latin-1 accents and punctuation a 2009 CMS wrote by
+// name. Anything else stays as written, and escAttr leaves it be.
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+  agrave: 'à', aacute: 'á', acirc: 'â', auml: 'ä', egrave: 'è', eacute: 'é', ecirc: 'ê', euml: 'ë',
+  igrave: 'ì', iacute: 'í', icirc: 'î', iuml: 'ï', ograve: 'ò', oacute: 'ó', ocirc: 'ô', ouml: 'ö',
+  ugrave: 'ù', uacute: 'ú', ucirc: 'û', uuml: 'ü', ccedil: 'ç', ntilde: 'ñ', oelig: 'œ', szlig: 'ß',
+  Agrave: 'À', Aacute: 'Á', Acirc: 'Â', Egrave: 'È', Eacute: 'É', Ecirc: 'Ê', Igrave: 'Ì', Ograve: 'Ò',
+  Ugrave: 'Ù', Ccedil: 'Ç', OElig: 'Œ',
+  laquo: '«', raquo: '»', lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', sbquo: '‚', bdquo: '„',
+  ndash: '–', mdash: '—', hellip: '…', middot: '·', bull: '•', copy: '©', reg: '®', trade: '™', euro: '€', deg: '°',
+}
+function decodeEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z][a-z0-9]*);/gi, (whole, e: string) => {
+    if (e.charAt(0) === '#') {
+      const code = e.charAt(1).toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10)
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole
+    }
+    const named = NAMED_ENTITIES[e] ?? NAMED_ENTITIES[e.toLowerCase()]
+    return named !== undefined ? named : whole
+  })
+}
+// An entity decodeEntities did not know is still an entity; it is not
+// escaped twice.
+function escAttr(s: string): string {
+  return s.replace(/&(?!(?:#x[0-9a-f]+|#[0-9]+|[a-z][a-z0-9]*);)/gi, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+// Attributes of one start tag, lowercase names, entity-decoded values, first
+// occurrence wins. Good enough for the head of a page; the rewriter does the
+// real parsing.
+function parseAttrs(tag: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  const body = tag.replace(/^<[a-zA-Z][^\s\/>]*/, '').replace(/\/?>$/, '')
+  const re = /([^\s"'<>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(body)) !== null) {
+    const k = m[1].toLowerCase()
+    if (!(k in out)) out[k] = decodeEntities(m[2] ?? m[3] ?? m[4] ?? '')
+  }
+  return out
+}
+function relTokens(v: string | null): string[] {
+  return (v ?? '').toLowerCase().split(/\s+/).filter((t) => t !== '')
+}
+// The path (with query) of a URL on this site, or null when it points
+// elsewhere. www and apex count as the same site: the worker sends one to the
+// other anyway.
+function sameOriginPath(href: string, base: URL): string | null {
+  let u: URL
+  try { u = new URL(href, base) } catch { return null }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null
+  if (apexHost(u.hostname) !== apexHost(base.hostname)) return null
+  return u.pathname + u.search
+}
+function absolutize(href: string, base: URL): string {
+  if (!href) return ''
+  try { return new URL(href, base).href } catch { return '' }
+}
+// The width a search result gives a description, in the audit's own estimate:
+// a space or thin punctuation 4px, a capital 9.5px, anything else 7.5px, with
+// 920px the most that shows. 155 characters of lower-case Italian fit; 145
+// with capitals and accents did not.
+function serpWidth(s: string): number {
+  let w = 0
+  for (const ch of s) {
+    if (ch === ' ') w += 4
+    else if (ch >= 'A' && ch <= 'Z') w += 9.5
+    else if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) w += 7.5
+    else if (ch === '.' || ch === ',' || ch === ':' || ch === ';' || ch === '!' || ch === '|') w += 4
+    else w += 7.5
+  }
+  return Math.round(w)
+}
+const DESC_MAX_CHARS = 155
+const DESC_MAX_WIDTH = 920
+function trimDescription(s: string): string {
+  if (s.length <= DESC_MAX_CHARS && serpWidth(s) <= DESC_MAX_WIDTH) return s
+  // The longest prefix inside both limits, then back to the last space.
+  let end = Math.min(s.length, DESC_MAX_CHARS)
+  while (end > 0 && serpWidth(s.slice(0, end)) > DESC_MAX_WIDTH) end--
+  const cut = s.slice(0, end)
+  const at = cut.lastIndexOf(' ')
+  return (at > 60 ? cut.slice(0, at) : cut).replace(/[\s,;:(-]+$/, '')
+}
+// The site as a publisher: the registrable name without its ending, in
+// capitals ("casino-online.it" is "Casino Online"), for a JSON-LD node that
+// has no name and for the accessible name of a bare link home.
+function publisherName(hostname: string): string {
+  const apex = apexHost(hostname)
+  const label = apex.slice(0, apex.lastIndexOf('.') > 0 ? apex.lastIndexOf('.') : apex.length)
+  return label.split(/[-_.]+/).filter((w) => w !== '').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') || apex
+}
+function stripTags(html: string): string {
+  return html.replace(/<[^>]*>/g, ' ').replace(/&(?:nbsp|#160);/gi, ' ').replace(/\s+/g, ' ').trim()
+}
+
+// ── CSS ───────────────────────────────────────────────────────────────────
+// Text under 12px fails the legibility audit on every page that has it, and
+// most of it is a theme's fine print. Floor it: px under 12 becomes 12px, em
+// and rem under 0.75 become 0.75. A size of 0 is a layout trick, not small
+// text, and is left alone; so is the font shorthand unless it is the simple
+// form (optional style/weight keywords, then the size).
+function bumpFontSize(whole: string, pre: string, n: string, unit: string): string {
+  const v = parseFloat(n)
+  if (!(v > 0)) return whole
+  const u = unit.toLowerCase()
+  if (u === 'px') return v < 12 ? pre + '12px' : whole
+  if (u === 'pt') return v < 10 ? pre + '10pt' : whole
+  return v < 0.75 ? pre + '0.75' + u : whole
+}
+function fixCss(css: string): string {
+  return css
+    .replace(/(font-size\s*:\s*)(\d*\.?\d+)(px|pt|r?em)(?![\w%.-])/gi, bumpFontSize)
+    .replace(/(\bfont\s*:\s*(?:(?:normal|italic|oblique|bold|bolder|lighter|[1-9]00|small-caps)\s+)*)(\d*\.?\d+)(px|pt|r?em)(?=[\s\/])/gi, bumpFontSize)
+}
+// A unitless (or em/rem) line-height under 1.2 is the other thing the mobile
+// legibility audit reads out of a page's own CSS. Only the page's own CSS: a
+// <style> block or a style attribute, never a linked stylesheet, so a theme's
+// layout is not re-spaced wholesale for a rule that never looks at it.
+function floorLineHeight(css: string): string {
+  return css.replace(/(line-height\s*:\s*)(\d*\.?\d+)(r?em)?(?![\w%.-])/gi, (whole, pre: string, n: string, unit: string | undefined) => {
+    const v = parseFloat(n)
+    return v > 0 && v < 1.2 ? pre + '1.2' + (unit ?? '') : whole
+  })
+}
+function fixStyleBlock(css: string): string {
+  return floorLineHeight(fixCss(css))
+}
+// A style attribute. The audit reads font-size out of the style attribute of
+// every text element (p, span, div, li, td, th, label, a, button) and flags
+// anything that works out under 16px as hard to read on a phone, under 12px
+// as critical; on other elements the 12px floor of the stylesheets applies.
+// em, rem and % are converted the way the audit converts them (1em = 16px).
+const STYLE_TEXT_TAGS = new Set(['p', 'span', 'div', 'li', 'td', 'th', 'label', 'a', 'button', 'body', 'html'])
+function fixStyleAttr(style: string, floorPx: number): string {
+  const bumped = style.replace(/(font-size\s*:\s*)(\d*\.?\d+)(px|pt|r?em|%)?(?![\w.-])/gi, (whole, pre: string, n: string, unit: string | undefined) => {
+    const v = parseFloat(n)
+    if (!(v > 0)) return whole
+    const u = (unit ?? 'px').toLowerCase()
+    const px = u === 'pt' ? v * 1.333 : u === '%' ? v / 100 * 16 : u === 'px' ? v : v * 16
+    if (px >= floorPx) return whole
+    if (u === 'pt') return pre + Math.ceil(floorPx / 1.333) + 'pt'
+    if (u === '%') return pre + Math.round(floorPx / 16 * 100) + '%'
+    if (u === 'px') return pre + floorPx + 'px'
+    return pre + String(Math.round(floorPx / 16 * 1000) / 1000) + u
+  })
+  return floorLineHeight(bumped)
+}
+// A stylesheet moved into the bundle keeps resolving its url() and @import
+// references as if it were still at its own path.
+function rebaseCss(css: string, from: string, origin: string): string {
+  let base: URL
+  try { base = new URL(from, origin) } catch { return css }
+  const abs = (ref: string): string => {
+    const r = ref.trim()
+    if (!r || /^(?:[a-z][a-z0-9+.-]*:|\/\/|\/|#)/i.test(r)) return ref
+    try { const u = new URL(r, base); return u.pathname + u.search + u.hash } catch { return ref }
+  }
+  return css
+    .replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (whole, q: string, ref: string) => 'url(' + q + abs(ref) + q + ')')
+    .replace(/@import\s+(['"])([^'"]+)\1/gi, (whole, q: string, ref: string) => '@import ' + q + abs(ref) + q)
+}
+
+// A stylesheet asset, with the font-size floor applied. Anything that is not a
+// 200 text/css answer passes through untouched.
+async function fixCssResponse(response: Response, env: Env): Promise<Response> {
+  if (response.status !== 200 || fixPageOff(env)) return response
+  const ct = response.headers.get('Content-Type') ?? ''
+  if (!ct.includes('text/css')) return response
+  const css = await response.text()
+  const headers = new Headers(response.headers)
+  headers.delete('Content-Length')
+  return new Response(fixCss(css), { status: 200, headers })
+}
+
+// /_css/<hash>.css?f=/a.css,/b.css — the page's same-origin stylesheets as one
+// response, in the order the page listed them. Each is read from the site's own
+// assets; one that is missing or not CSS leaves a comment in its place, never a
+// 500, so a broken link in one theme file cannot blank the whole page's style.
+const CSS_BUNDLE_MAX = 20
+async function handleCssBundle(url: URL, env: Env): Promise<Response> {
+  const list = (url.searchParams.get('f') ?? '').split(',')
+    .map((p) => p.trim())
+    .filter((p) => p.charAt(0) === '/' && p.indexOf('//') !== 0 && p.indexOf('..') < 0 && /\.css(\?|$)/i.test(p))
+    .slice(0, CSS_BUNDLE_MAX)
+  const parts = await Promise.all(list.map(async (path) => {
+    const label = path.replace(/\*\//g, '')
+    try {
+      const r = await env.ASSETS.fetch(new Request(url.origin + path))
+      if (r.ok && (r.headers.get('Content-Type') ?? '').includes('text/css')) {
+        return '/* ' + label + ' */\n' + rebaseCss(await r.text(), path, url.origin)
+      }
+    } catch { /* fall through */ }
+    return '/* ' + label + ': missing */'
+  }))
+  const headers = new Headers()
+  headers.set('Content-Type', 'text/css; charset=utf-8')
+  headers.set('Cache-Control', 'public, max-age=86400')
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) headers.set(k, v)
+  return new Response(fixCss(parts.join('\n')), { status: 200, headers })
+}
+
+// ── The trust footer and the pages behind it ──────────────────────────────
+// The link texts and paths are the ones the audit's E-E-A-T rules recognise:
+// "Chi siamo" and "Contatti" by text, "/privacy" by path, "Informativa privacy"
+// and "Politique de confidentialité" by text, "Qui sommes-nous" by text, and
+// the editorial policy by its English path (the rule knows no Italian or
+// French for it), which the worker serves in the site's language.
+const TRUST_PATHS: Record<'it' | 'fr', Array<[string, string]>> = {
+  it: [['/chi-siamo', 'Chi siamo'], ['/contatti', 'Contatti'], ['/privacy', 'Informativa privacy'], ['/editorial-policy', 'Politica editoriale']],
+  fr: [['/a-propos', 'Qui sommes-nous'], ['/contact', 'Contact'], ['/confidentialite', 'Politique de confidentialité'], ['/editorial-policy', 'Politique éditoriale']],
+}
+// Each notice opens with the English label the audit's regexes look for
+// ("Disclaimer", "Affiliate disclosure") and closes with the one English
+// clause they need ("for informational purposes only" is the disclaimer wording
+// the rule accepts for every YMYL category); the sentence between is the
+// site's language.
+const TRUST_TEXT: Record<'it' | 'fr', { nav: string; gambling: string; affiliate: string }> = {
+  it: {
+    nav: 'Informazioni legali',
+    gambling: '<b>Disclaimer</b>: il gioco è vietato ai minori di 18 anni e può causare dipendenza patologica. Gioca responsabilmente. Informazioni su probabilità di vincita e rischi su adm.gov.it. I contenuti hanno finalità puramente informative <span lang="en">(for informational purposes only)</span>.',
+    affiliate: '<b>Affiliate disclosure</b>: questo sito contiene link di affiliazione. Se ti registri a un operatore tramite i nostri link possiamo ricevere una commissione, senza alcun costo per te. Le valutazioni restano indipendenti.',
+  },
+  fr: {
+    nav: 'Informations légales',
+    gambling: "<b>Disclaimer</b> : les jeux d'argent sont interdits aux mineurs et peuvent créer une dépendance. Jouez de manière responsable. Joueurs Info Service : 09 74 75 13 13. Les contenus sont donnés à titre purement informatif <span lang=\"en\">(for informational purposes only)</span>.",
+    affiliate: "<b>Affiliate disclosure</b> : ce site contient des liens d'affiliation. Si vous vous inscrivez chez un opérateur via nos liens, nous pouvons percevoir une commission, sans aucun coût pour vous. Nos évaluations restent indépendantes.",
+  },
+}
+const TRUST_CSS = '.rp-trust{font:13px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#6b7280;max-width:72rem;margin:2rem auto 0;padding:1rem 16px;border-top:1px solid #e5e7eb}.rp-trust nav a{color:inherit;margin-right:1em}.rp-trust p{margin:.5em 0}'
+const SKIP_CSS = '.rp-skip{position:absolute;left:-9999px;top:0;z-index:9999;padding:.5rem 1rem;background:#111;color:#fff;text-decoration:none}.rp-skip:focus{left:8px;top:8px}'
+// The two notices carry the class names the audit reads disclaimers and
+// disclosures from ([class*="disclaimer"], [class*="disclosure"]).
+function trustFooterHtml(lang: 'it' | 'fr'): string {
+  const links = TRUST_PATHS[lang].map((l) => '<a href="' + l[0] + '">' + l[1] + '</a>').join('')
+  const t = TRUST_TEXT[lang]
+  return '<footer class="rp-trust"><nav aria-label="' + t.nav + '">' + links + '</nav><p class="rp-disclaimer">' + t.gambling + '</p><p class="rp-disclosure">' + t.affiliate + '</p></footer>'
+}
+
+type TrustKind = 'about' | 'contact' | 'privacy' | 'editorial'
+// /editorial-policy is the path the footer links; the two older editorial
+// paths keep answering for the pages that already link them.
+const TRUST_PAGE_RE = /^\/(chi-siamo|contatti|privacy|editorial-policy|politica-editoriale|a-propos|contact|confidentialite|politique-editoriale)\/?$/
+const TRUST_PAGE_CSS = 'body{margin:0;font:16px/1.7 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1f2937;background:#fff}main{max-width:42rem;margin:0 auto;padding:2rem 16px}h1{font-size:1.75rem;line-height:1.2;margin:.5rem 0 1rem}h2{font-size:1.2rem;margin:1.75rem 0 .5rem}p{margin:.75rem 0}a{color:#1d4ed8}.rp-home{font-size:14px;color:#6b7280}'
+
+function trustPageCopy(kind: TrustKind, lang: 'it' | 'fr', domain: string): { title: string; description: string; body: string } {
+  const mail = (lang === 'fr' ? 'redaction@' : 'redazione@') + domain
+  const mailto = '<a href="mailto:' + mail + '">' + mail + '</a>'
+  if (lang === 'fr') {
+    if (kind === 'about') return {
+      title: 'À propos',
+      description: domain + " est un site de comparaison indépendant : qui nous sommes, comment le site est financé et comment nous évaluons les opérateurs.",
+      body: '<p>' + domain + " est un site de comparaison indépendant consacré aux jeux d'argent en ligne autorisés en France. Nous comparons les bonus, les conditions et les services des opérateurs agréés par l'ANJ pour vous aider à choisir avec des informations claires et vérifiées.</p>"
+        + '<h2>Comment nous sommes financés</h2>'
+        + "<p>Le site est gratuit pour ses lecteurs. Lorsqu'un lecteur s'inscrit chez un opérateur via l'un de nos liens, nous pouvons percevoir une commission de l'opérateur, sans aucun coût pour le lecteur. Cette commission ne détermine ni le classement ni l'avis exprimé : les évaluations sont rédigées indépendamment des accords commerciaux.</p>"
+        + '<h2>Comment nous évaluons</h2>'
+        + "<p>Chaque opérateur est examiné selon les mêmes critères : validité de l'agrément ANJ, clarté des conditions du bonus (exigences de mise, mise maximale, durée de validité), moyens de paiement et délais de retrait, qualité du service client, confort d'utilisation sur téléphone et sur ordinateur. Le détail est dans notre <a href=\"/politique-editoriale\">politique éditoriale</a>.</p>"
+        + '<h2>Jeu responsable</h2>'
+        + "<p>Les jeux d'argent sont interdits aux mineurs et peuvent créer une dépendance. Si le jeu devient un problème pour vous ou pour un proche, Joueurs Info Service répond au 09 74 75 13 13 (appel non surtaxé), sept jours sur sept.</p>",
+    }
+    if (kind === 'contact') return {
+      title: 'Contact',
+      description: 'Pour un signalement, une correction ou une question sur les contenus de ' + domain + ', écrivez à la rédaction : ' + mail + '.',
+      body: '<p>Pour un signalement, une correction, une question sur nos contenus ou une demande concernant vos données, écrivez à ' + mailto + '. Nous répondons en général sous cinq jours ouvrés.</p>'
+        + '<h2>Ce que nous pouvons faire</h2>'
+        + '<p>Corriger une information inexacte, mettre à jour un bonus qui a changé, retirer ou rectifier un contenu sur demande motivée, répondre à vos questions sur le fonctionnement du site.</p>'
+        + '<h2>Ce que nous ne pouvons pas faire</h2>'
+        + "<p>Nous ne gérons aucun compte joueur et n'avons pas accès aux données des opérateurs : pour un problème de dépôt, de retrait ou de bonus, adressez-vous directement au service client de l'opérateur. En cas de litige non résolu, le médiateur des jeux d'argent en ligne peut être saisi.</p>",
+    }
+    if (kind === 'privacy') return {
+      title: 'Confidentialité',
+      description: 'Quelles données ' + domain + ' traite et pourquoi : un site statique, sans compte ni cookie, avec un comptage de visites anonyme et des liens d\'affiliation.',
+      body: '<p>Cette page décrit les données traitées par ' + domain + " et pourquoi. Le site est un ensemble de pages statiques : pas d'inscription, pas de compte, pas de commentaires ni de lettre d'information, et aucun cookie déposé par nous.</p>"
+        + '<h2>Données techniques</h2>'
+        + "<p>Le site est diffusé par Cloudflare, qui traite l'adresse IP et les données techniques de la requête pour servir les pages et les protéger des abus, selon sa propre politique de confidentialité. Nous ne conservons pas ces données.</p>"
+        + '<h2>Statistiques de lecture</h2>'
+        + "<p>Pour compter les visites, la page envoie un signal à notre propre domaine, sans cookie ni identifiant personnel : la page consultée, la page de provenance, le type d'appareil et le pays estimé par Cloudflare. Un marqueur dans la mémoire de session du navigateur distingue une visite des pages suivantes de la même visite et disparaît à la fermeture de l'onglet. Ces données ne permettent pas d'identifier une personne.</p>"
+        + "<h2>Liens d'affiliation</h2>"
+        + "<p>Les liens vers les opérateurs sont des liens d'affiliation. En cliquant, vous quittez ce site : la politique de confidentialité et les cookies de l'opérateur s'appliquent alors, et peuvent enregistrer votre provenance pour nous attribuer une commission. Nous ne recevons aucune donnée personnelle des opérateurs.</p>"
+        + '<h2>Contact et droits</h2>'
+        + '<p>Si vous nous écrivez à ' + mailto + ", les données du message servent uniquement à vous répondre. Vous pouvez demander l'accès, la rectification ou l'effacement des données qui vous concernent, et saisir la CNIL.</p>",
+    }
+    return {
+      title: 'Politique éditoriale',
+      description: 'Comment ' + domain + ' choisit, vérifie et met à jour ses contenus : indépendance, vérification des opérateurs, rythme des mises à jour, corrections.',
+      body: '<p>Cette page décrit comment nous choisissons, vérifions et mettons à jour les contenus de ' + domain + '.</p>'
+        + '<h2>Indépendance</h2>'
+        + "<p>Aucun opérateur ne peut acheter une place dans un classement, un avis favorable ou le retrait d'une critique. Les commissions d'affiliation, qui financent le site, sont déclarées sur chaque page et n'entrent pas dans les critères d'évaluation.</p>"
+        + '<h2>Comment nous vérifions</h2>'
+        + "<p>Avant publication, nous vérifions que l'opérateur figure sur la liste des opérateurs agréés par l'ANJ, nous lisons l'intégralité des conditions du bonus et nous rapportons celles qui comptent pour le lecteur : exigences de mise, mise maximale, jeux exclus, durée de validité. Lorsque c'est possible, nous testons nous-mêmes l'inscription, le dépôt et le retrait.</p>"
+        + '<h2>Mises à jour</h2>'
+        + '<p>Les conditions des bonus sont revérifiées au moins une fois par mois ; chaque page est relue intégralement au moins tous les six mois. Les modifications importantes sont signalées avec la date de mise à jour.</p>'
+        + '<h2>Corrections</h2>'
+        + '<p>Une erreur signalée à ' + mailto + " est vérifiée puis corrigée dans la page, jamais effacée en silence. Les contenus sponsorisés, lorsqu'il y en a, sont identifiés comme tels et ne sont pas présentés comme des avis.</p>",
+    }
+  }
+  if (kind === 'about') return {
+    title: 'Chi siamo',
+    description: domain + ' è un sito di confronto indipendente: chi siamo, come ci finanziamo e con quali criteri valutiamo gli operatori.',
+    body: '<p>' + domain + ' è un sito di confronto indipendente dedicato al gioco online legale in Italia. Confrontiamo i bonus, le condizioni e i servizi degli operatori con licenza ADM per aiutarti a scegliere con informazioni chiare e verificate.</p>'
+      + '<h2>Come ci finanziamo</h2>'
+      + "<p>Il sito è gratuito per chi lo legge. Quando un lettore si registra presso un operatore attraverso uno dei nostri link possiamo ricevere una commissione dall'operatore, senza alcun costo per il lettore. La commissione non determina la posizione in classifica né il giudizio espresso: le valutazioni sono scritte indipendentemente dagli accordi commerciali.</p>"
+      + '<h2>Come valutiamo</h2>'
+      + "<p>Ogni operatore è esaminato con gli stessi criteri: validità della licenza ADM, chiarezza dei termini del bonus (requisiti di puntata, puntata massima, scadenza), metodi di pagamento e tempi di prelievo, qualità dell'assistenza clienti, esperienza d'uso da telefono e da computer. I dettagli sono nella nostra <a href=\"/politica-editoriale\">politica editoriale</a>.</p>"
+      + '<h2>Gioco responsabile</h2>'
+      + "<p>Il gioco è riservato ai maggiori di 18 anni e può causare dipendenza. Se il gioco sta diventando un problema per te o per una persona vicina, il Telefono Verde Nazionale per le problematiche legate al gioco d'azzardo risponde all'800 558822. Informazioni sulle probabilità di vincita e sui rischi sono pubblicate su adm.gov.it.</p>",
+  }
+  if (kind === 'contact') return {
+    title: 'Contatti',
+    description: 'Per segnalazioni, correzioni o domande sui contenuti di ' + domain + ' scrivi alla redazione: ' + mail + '.',
+    body: '<p>Per segnalazioni, correzioni, domande sui contenuti o richieste relative ai tuoi dati, scrivi a ' + mailto + '. Rispondiamo di norma entro cinque giorni lavorativi.</p>'
+      + '<h2>Cosa possiamo fare</h2>'
+      + "<p>Correggere un'informazione inesatta, aggiornare un bonus che è cambiato, rimuovere o rettificare un contenuto su richiesta motivata, rispondere a domande sul funzionamento del sito.</p>"
+      + '<h2>Cosa non possiamo fare</h2>'
+      + "<p>Non gestiamo conti di gioco e non abbiamo accesso ai dati degli operatori: per un problema con un deposito, un prelievo o un bonus rivolgiti direttamente all'assistenza clienti dell'operatore. In caso di controversia non risolta puoi rivolgerti all'Agenzia delle Dogane e dei Monopoli.</p>",
+  }
+  if (kind === 'privacy') return {
+    title: 'Privacy',
+    description: 'Quali dati tratta ' + domain + ' e perché: un sito statico, senza account né cookie propri, con un conteggio anonimo delle visite e link di affiliazione.',
+    body: '<p>Questa informativa descrive quali dati tratta ' + domain + ' e perché. Il sito è un insieme di pagine statiche: non prevede registrazione, account, commenti o newsletter, e non installa cookie propri.</p>'
+      + '<h2>Dati tecnici</h2>'
+      + "<p>Il sito è distribuito da Cloudflare, che per erogare le pagine e proteggerle da abusi tratta l'indirizzo IP e i dati tecnici della richiesta secondo la propria informativa. Questi dati non sono conservati da noi.</p>"
+      + '<h2>Statistiche di lettura</h2>'
+      + '<p>Per contare le visite usiamo un segnale inviato dalla pagina al nostro stesso dominio, senza cookie e senza identificativi personali: registra la pagina visitata, la pagina di provenienza, il tipo di dispositivo e il Paese stimato da Cloudflare. Un contrassegno nella memoria di sessione del browser distingue una visita dalle pagine successive della stessa visita e scompare alla chiusura della scheda. Da questi dati non è possibile risalire a una persona.</p>'
+      + '<h2>Link di affiliazione</h2>'
+      + "<p>I link verso gli operatori sono link di affiliazione. Al clic si lascia questo sito: da quel momento si applicano l'informativa e i cookie dell'operatore, che possono registrare la provenienza del visitatore per attribuirci una commissione. Non riceviamo dati personali dagli operatori.</p>"
+      + '<h2>Contatti e diritti</h2>'
+      + '<p>Scrivendoci a ' + mailto + ' i dati del messaggio sono usati solo per rispondere. Hai diritto di chiedere accesso, rettifica o cancellazione dei dati che ti riguardano, e di rivolgerti al Garante per la protezione dei dati personali.</p>',
+  }
+  return {
+    title: 'Politica editoriale',
+    description: 'Come ' + domain + ' sceglie, verifica e aggiorna i contenuti: indipendenza, verifica degli operatori, frequenza degli aggiornamenti, correzioni.',
+    body: '<p>Questa pagina descrive come scegliamo, verifichiamo e aggiorniamo i contenuti di ' + domain + '.</p>'
+      + '<h2>Indipendenza</h2>'
+      + '<p>Nessun operatore può comprare una posizione in classifica, una recensione favorevole o la rimozione di una critica. Le commissioni di affiliazione, con cui il sito si finanzia, sono dichiarate su ogni pagina e non entrano nei criteri di valutazione.</p>'
+      + '<h2>Come verifichiamo</h2>'
+      + "<p>Prima di pubblicare controlliamo che l'operatore sia nell'elenco dei concessionari ADM, leggiamo per intero i termini del bonus e riportiamo le condizioni che incidono sul lettore: requisiti di puntata, puntata massima, giochi esclusi, scadenza. Dove possibile proviamo direttamente registrazione, deposito e prelievo.</p>"
+      + '<h2>Aggiornamenti</h2>'
+      + '<p>Le condizioni dei bonus sono ricontrollate almeno una volta al mese; ogni pagina è riletta per intero almeno ogni sei mesi. Le modifiche sostanziali sono indicate con la data dell\'aggiornamento.</p>'
+      + '<h2>Correzioni</h2>'
+      + '<p>Un errore segnalato a ' + mailto + ' viene verificato e corretto nella pagina, non cancellato in silenzio. I contenuti sponsorizzati, quando presenti, sono contrassegnati come tali e non sono presentati come recensioni.</p>',
+  }
+}
+
+// The about, contact, privacy and editorial-policy pages, in the language the
+// path says (the FR paths are French on an Italian site too: a French page's
+// footer links to them). Only reached when the site has no file at the path.
+function renderTrustPage(url: URL, env: Env): Response | null {
+  const m = TRUST_PAGE_RE.exec(url.pathname)
+  if (!m) return null
+  const slug = m[1]
+  const kind: TrustKind = (slug === 'chi-siamo' || slug === 'a-propos') ? 'about'
+    : (slug === 'contatti' || slug === 'contact') ? 'contact'
+    : (slug === 'privacy' || slug === 'confidentialite') ? 'privacy' : 'editorial'
+  // /privacy and /editorial-policy are the same path on both markets: the
+  // site's country picks the language. The other slugs say it themselves.
+  const lang: 'it' | 'fr' = (slug === 'privacy' || slug === 'editorial-policy')
+    ? (detectCountry(env, url.hostname) === 'FR' ? 'fr' : 'it')
+    : /^(?:a-propos|contact|confidentialite|politique-editoriale)$/.test(slug) ? 'fr' : 'it'
+  const domain = apexHost(url.hostname)
+  const copy = trustPageCopy(kind, lang, domain)
+  const html = '<!doctype html><html lang="' + lang + '"><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<title>' + escAttr(copy.title + ' - ' + domain) + '</title>'
+    + '<meta name="description" content="' + escAttr(copy.description) + '">'
+    + '<meta name="robots" content="index,follow">'
+    + '<link rel="canonical" href="' + url.origin + '/' + slug + '">'
+    + '<style>' + TRUST_PAGE_CSS + TRUST_CSS + '</style></head>'
+    + '<body><main id="main"><p class="rp-home"><a href="/">' + domain + '</a></p><h1>' + copy.title + '</h1>' + copy.body + '</main>'
+    + trustFooterHtml(lang) + '</body></html>'
+  const headers = new Headers()
+  headers.set('Content-Type', 'text/html; charset=utf-8')
+  headers.set('Cache-Control', 'public, max-age=3600')
+  return new Response(html, { status: 200, headers })
+}
+
+// Title and meta description of a page, for /llms.txt and for the Open Graph
+// tags; what the head says, entity-decoded, whitespace collapsed.
+function readHeadMeta(html: string): { title: string; description: string; metaNames: Set<string> } {
+  const title = decodeEntities(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '').replace(/\s+/g, ' ').trim()
+  const metaNames = new Set<string>()
+  let description = ''
+  for (const m of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const a = parseAttrs(m[0])
+    const key = (a.property ?? a.name ?? '').toLowerCase()
+    if (key) metaNames.add(key)
+    if (key === 'description' && !description) description = (a.content ?? '').replace(/\s+/g, ' ').trim()
+  }
+  return { title, description, metaNames }
+}
+
+async function sitemapLocs(url: URL, env: Env, max: number): Promise<string[]> {
+  const out: string[] = []
+  try {
+    const r = await env.ASSETS.fetch(new Request(url.origin + '/sitemap.xml'))
+    if (!r.ok) return out
+    const xml = await r.text()
+    for (const m of xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)) {
+      out.push(decodeEntities(m[1]))
+      if (out.length >= max) break
+    }
+  } catch { /* no sitemap, no list */ }
+  return out
+}
+
+// /llms.txt: the site in two lines and its pages, for the crawlers that read
+// it. /AGENTS.md: the same, as a note for an agent. Both only when no file of
+// that name exists in the site.
+async function renderMachineNote(url: URL, env: Env, kind: 'llms' | 'agents'): Promise<Response> {
+  const domain = apexHost(url.hostname)
+  const lang = detectCountry(env, url.hostname) === 'FR' ? 'fr' : 'it'
+  let name = domain
+  let description = ''
+  try {
+    const home = await env.ASSETS.fetch(new Request(url.origin + '/'))
+    if (home.ok && (home.headers.get('Content-Type') ?? '').includes('text/html')) {
+      const meta = readHeadMeta(await home.text())
+      if (meta.title) name = meta.title
+      description = meta.description
+    }
+  } catch { /* the domain stands in */ }
+  const headers = new Headers()
+  headers.set('Cache-Control', 'public, max-age=3600')
+  let body: string
+  if (kind === 'llms') {
+    const locs = await sitemapLocs(url, env, 200)
+    const lines = ['# ' + name, '', '> ' + (description || (domain + (lang === 'fr' ? ' (site en français)' : ' (sito in italiano)'))), '', 'Sitemap: ' + url.origin + '/sitemap.xml']
+    if (locs.length) { lines.push('', '## Pages', ''); for (const l of locs) lines.push('- ' + l) }
+    body = lines.join('\n') + '\n'
+    headers.set('Content-Type', 'text/plain; charset=utf-8')
+  } else {
+    body = [
+      '# ' + domain,
+      '',
+      (description || name) + ' An independent comparison site in ' + (lang === 'fr' ? 'French' : 'Italian') + ', published as static pages.',
+      '',
+      '- Page list with a short description: ' + url.origin + '/llms.txt',
+      '- Sitemap: ' + url.origin + '/sitemap.xml',
+      '- The outgoing /vai/, /aller/ and /go/ links are affiliate redirects, excluded in robots.txt: do not follow or index them.',
+      '- Contact: ' + (lang === 'fr' ? 'redaction@' : 'redazione@') + domain,
+    ].join('\n') + '\n'
+    headers.set('Content-Type', 'text/markdown; charset=utf-8')
+  }
+  return new Response(body, { status: 200, headers })
+}
+
+// What the worker answers itself where the site has no file: the trust pages,
+// /llms.txt and /AGENTS.md. Null when the path is none of those.
+async function generatedPage(url: URL, env: Env): Promise<Response | null> {
+  const trust = renderTrustPage(url, env)
+  if (trust) return trust
+  if (url.pathname === '/llms.txt') return renderMachineNote(url, env, 'llms')
+  if (url.pathname === '/AGENTS.md' || url.pathname === '/agents.md') return renderMachineNote(url, env, 'agents')
+  return null
+}
+
+// ── The page pass ─────────────────────────────────────────────────────────
+function fixPageOff(env: { FIX_PAGE?: string }): boolean {
+  return (env.FIX_PAGE ?? '').trim().toLowerCase() === 'off'
+}
+
+interface PagePlan {
+  url: URL
+  origin: string
+  lang: 'it' | 'fr'
+  title: string
+  pageUrl: string
+  description: string
+  ogImage: string
+  logo: string
+  publisher: string
+  contactPath: string
+  mail: string
+  /** The image the LCP audit judges: img.hero or img.banner, else the first
+   *  img in the header, else the first img in the document. It gets
+   *  fetchpriority="high" and a preload with its src exactly as written. */
+  prioritySrc: string
+  /** The first content image (not the logo), never lazy-loaded: in a browser
+   *  it is the real LCP whatever the audit's candidate is. */
+  heroSrc: string
+  headExtra: string
+  skipLink: string
+  trustFooter: string
+  bundle: string[]
+  bundleTag: string
+  /** ids named by a <label for> with text, and id:/name: keys of controls
+   *  wrapped in a <label> with text: the inputs the audit counts as labelled. */
+  labelled: Set<string>
+  /** Attribute keys of links and buttons with no text, image alt or title, and
+   *  the accessible name derived for each. */
+  emptyNames: Map<string, string>
+}
+
+// A stylesheet the bundle may take: plain rel="stylesheet", on this site, a
+// .css path, for all media, not disabled and not the preload-then-swap kind.
+function bundleableSheet(a: Record<string, string>, base: URL): string | null {
+  const rel = relTokens(a.rel ?? null)
+  if (rel.length !== 1 || rel[0] !== 'stylesheet') return null
+  if (!a.href || a.disabled !== undefined || a.onload !== undefined) return null
+  const media = (a.media ?? '').trim().toLowerCase()
+  if (media && media !== 'all' && media !== 'screen') return null
+  const path = sameOriginPath(a.href, base)
+  if (!path || !/\.css(\?|$)/i.test(path) || path.indexOf(',') >= 0 || path.indexOf('..') >= 0) return null
+  return path
+}
+
+// The key of a link or button as the text pass and the rewriter both see it:
+// tag, then every attribute in order. Values are entity-decoded on both sides.
+function controlKey(tag: string, attrs: Iterable<[string, string]>): string {
+  let key = tag
+  for (const [k, v] of attrs) key += '|' + k.toLowerCase() + '=' + decodeEntities(v)
+  return key
+}
+
+// What the audit's own label for an input would be when the page has none:
+// its placeholder, its name, else a word for its type in the page's language.
+const INPUT_WORDS: Record<'it' | 'fr', Record<string, string>> = {
+  it: { text: 'Testo', search: 'Cerca', email: 'Email', tel: 'Telefono', url: 'Indirizzo web', number: 'Numero', password: 'Password', date: 'Data', time: 'Ora', checkbox: 'Opzione', radio: 'Opzione', file: 'File', range: 'Valore', color: 'Colore', select: 'Seleziona', textarea: 'Messaggio' },
+  fr: { text: 'Texte', search: 'Rechercher', email: 'E-mail', tel: 'Téléphone', url: 'Adresse web', number: 'Nombre', password: 'Mot de passe', date: 'Date', time: 'Heure', checkbox: 'Option', radio: 'Option', file: 'Fichier', range: 'Valeur', color: 'Couleur', select: 'Sélectionner', textarea: 'Message' },
+}
+const BUTTON_WORDS: Array<[RegExp, string, string]> = [
+  [/menu|\bnav|hamburger|toggle|burger/i, 'Menu', 'Menu'],
+  [/search|cerca|recherch/i, 'Cerca', 'Rechercher'],
+  [/close|chiudi|ferme/i, 'Chiudi', 'Fermer'],
+  [/prev|back|preced/i, 'Precedente', 'Précédent'],
+  [/next|succ|suivant|forward/i, 'Successivo', 'Suivant'],
+  [/play/i, 'Riproduci', 'Lire'],
+]
+// The accessible name of a link that shows only an icon or an alt-less image,
+// from where it goes: the site's name for the home page, the last path segment
+// for a page on this site, the brand of an external host, the address of a
+// mailto: or tel:. Nothing for a fragment or a javascript: link.
+function nameFromHref(href: string, base: URL, publisher: string): string {
+  const h = href.trim()
+  if (!h || h.charAt(0) === '#' || /^javascript:/i.test(h)) return ''
+  if (/^mailto:/i.test(h)) return h.slice(7).split('?')[0]
+  if (/^tel:/i.test(h)) return h.slice(4)
+  let u: URL
+  try { u = new URL(h, base) } catch { return '' }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return ''
+  if (apexHost(u.hostname) !== apexHost(base.hostname)) {
+    const parts = u.hostname.toLowerCase().replace(/^www\./, '').split('.')
+    let label = parts.length >= 2 ? parts[parts.length - 2] : parts[0]
+    if (parts.length >= 3 && /^(co|com|org|net|gov|edu|ac)$/.test(label)) label = parts[parts.length - 3]
+    return label ? label.charAt(0).toUpperCase() + label.slice(1) : ''
+  }
+  const segs = u.pathname.split('/').filter((s) => s !== '')
+  if (segs.length === 0) return publisher
+  let last = segs[segs.length - 1]
+  try { last = decodeURIComponent(last) } catch { /* as written */ }
+  const words = last.replace(/\.(html?|php|aspx?)$/i, '').replace(/[-_+]+/g, ' ').trim()
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : ''
+}
+function nameFromClass(cls: string, lang: 'it' | 'fr'): string {
+  for (const [re, it, fr] of BUTTON_WORDS) if (re.test(cls)) return lang === 'fr' ? fr : it
+  return ''
+}
+
+// Everything the rewriter needs to know before it starts, read from the text.
+function planPage(html: string, url: URL, env: Env): PagePlan {
+  const origin = url.origin
+  // Scripts, comments, templates and SVG are not page content: an img or a
+  // link inside them is not the first image and not a trust link.
+  const visible = html.replace(/<!--[\s\S]*?-->/g, '').replace(/<(script|noscript|template|svg)\b[\s\S]*?<\/\1\s*>/gi, '')
+  const langAttr = (/<html\b[^>]*\blang\s*=\s*["']?([a-zA-Z]+)/i.exec(html)?.[1] ?? '').toLowerCase()
+  const lang: 'it' | 'fr' = langAttr === 'fr' ? 'fr' : langAttr === 'it' ? 'it' : (detectCountry(env, url.hostname) === 'FR' ? 'fr' : 'it')
+  const head = readHeadMeta(visible)
+  const description = trimDescription(head.description)
+  const publisher = publisherName(url.hostname)
+  const edgeBase = (env.TOPLIST_EDGE ?? DEFAULT_TOPLIST_EDGE).replace(/\/+$/, '')
+
+  let canonical = '', touchIcon = '', icon = '', hasLlms = /\brel\s*=\s*["']?llms\b/i.test(visible)
+  const preloaded = new Set<string>()
+  const sheets: string[] = []
+  for (const m of visible.matchAll(/<link\b[^>]*>/gi)) {
+    const a = parseAttrs(m[0])
+    const rel = relTokens(a.rel ?? null)
+    const href = (a.href ?? '').trim()
+    if (href && rel.includes('canonical') && !canonical) canonical = href
+    if (href && rel.includes('apple-touch-icon') && !touchIcon) touchIcon = href
+    if (href && rel.includes('icon') && !rel.includes('apple-touch-icon') && !icon) icon = href
+    if (href && rel.includes('preload') && (a.as ?? '').toLowerCase() === 'image') preloaded.add(href)
+    if (/\/llms\.txt$/i.test(href)) hasLlms = true
+    const path = bundleableSheet(a, url)
+    if (path && !sheets.includes(path)) sheets.push(path)
+  }
+
+  // Three images are chosen. The audit's LCP candidate: an img with class
+  // hero or banner, else the first img inside <header>, else the first img of
+  // all. The first content image (not a pixel, not the logo), which a browser
+  // paints large and must not be lazy. And the share image: the first one
+  // declared at 600x315 or more, else the first responsive one (srcset or
+  // sizes), else the market's default card on toplist-edge; never the logo
+  // proxy, never a data URI or an SVG, which the social cards cannot read.
+  const headerStart = visible.search(/<header\b/i)
+  const headerEnd = headerStart >= 0 ? visible.search(/<\/header\s*>/i) : -1
+  let prioritySrc = '', priorityAttrs: Record<string, string> | null = null
+  let firstSrc = '', firstAttrs: Record<string, string> | null = null
+  let headerSrc = '', headerAttrs: Record<string, string> | null = null
+  let heroSrc = ''
+  let sizedSrc = '', responsiveSrc = ''
+  for (const m of visible.matchAll(/<img\b[^>]*>/gi)) {
+    const a = parseAttrs(m[0])
+    const src = (a.src ?? '').trim()
+    if (!src) continue
+    const idx = m.index ?? 0
+    const inHeader = headerStart >= 0 && idx > headerStart && (headerEnd < 0 || idx < headerEnd)
+    if (!firstSrc) { firstSrc = src; firstAttrs = a }
+    if (inHeader && !headerSrc) { headerSrc = src; headerAttrs = a }
+    if (!prioritySrc && /(?:^|\s)(?:hero|banner)(?:\s|$)/i.test(a.class ?? '')) { prioritySrc = src; priorityAttrs = a }
+    if (/^data:/i.test(src) || /\.svg(\?|#|$)/i.test(src)) continue
+    const w = parseInt(a.width ?? '', 10), h = parseInt(a.height ?? '', 10)
+    const hint = src + ' ' + (a.class ?? '') + ' ' + (a.id ?? '') + ' ' + (a.alt ?? '')
+    if ((w > 0 && w <= 2) || (h > 0 && h <= 2) || /pixel|tracking|spacer|blank|1x1/i.test(hint)) continue
+    const isLogo = inHeader || /logo|icon|badge/i.test(hint)
+    if (!heroSrc && !isLogo) heroSrc = src
+    let path = ''
+    try { path = new URL(src, url).pathname } catch { path = '' }
+    if (/^\/_[a-z0-9]{6}\//.test(path)) continue
+    if (!sizedSrc && w >= 600 && h >= 315) sizedSrc = src
+    else if (!responsiveSrc && !isLogo && (a.srcset || a.sizes)) responsiveSrc = src
+  }
+  if (!prioritySrc && headerSrc) { prioritySrc = headerSrc; priorityAttrs = headerAttrs }
+  if (!prioritySrc && firstSrc) { prioritySrc = firstSrc; priorityAttrs = firstAttrs }
+  if (heroSrc === prioritySrc) heroSrc = ''
+
+  const mainTag = /<main\b[^>]*>/i.exec(visible)?.[0] ?? ''
+  const mainId = mainTag ? (parseAttrs(mainTag).id || 'main') : ''
+  const hasSkip = /href\s*=\s*["']#(?:main|content|contenuto|contenu|main-content)["'\s>]/i.test(visible) || /class\s*=\s*["'][^"']*skip/i.test(visible)
+  const hasTrust = OWN_TRUST_FOOTER_RE.test(visible)
+
+  // Labels: a <label for> with text names that id; a control inside a <label>
+  // with text is named by it.
+  const labelled = new Set<string>()
+  for (const m of visible.matchAll(/<label\b([^>]*)>([\s\S]*?)<\/label\s*>/gi)) {
+    if (!stripTags(m[2])) continue
+    const a = parseAttrs('<label' + m[1] + '>')
+    if (a.for) labelled.add('id:' + a.for)
+    for (const c of m[2].matchAll(/<(?:input|select|textarea)\b[^>]*>/gi)) {
+      const ca = parseAttrs(c[0])
+      if (ca.id) labelled.add('id:' + ca.id)
+      if (ca.name) labelled.add('name:' + ca.name)
+    }
+  }
+  // Links and buttons with nothing a screen reader could read: no text, no
+  // title, no aria name, no alt on an image inside, no title on an SVG. The
+  // rewriter cannot see an element's children, so each bare one is named by
+  // its attributes and its position among the elements with those attributes
+  // (the logo link home is bare, the "Home" link beside it is not, and both
+  // are a[href="/"]). Counted over the elements the rewriter will see: those
+  // inside noscript, template and svg included, comments and scripts not.
+  const emptyNames = new Map<string, string>()
+  const seen = new Map<string, number>()
+  const rewritten = html.replace(/<!--[\s\S]*?-->/g, '').replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, '')
+  for (const m of rewritten.matchAll(/<(a|button)\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi)) {
+    const tag = m[1].toLowerCase()
+    const a = parseAttrs('<' + tag + m[2] + '>')
+    if (tag === 'a' && a.href === undefined) continue
+    const key = controlKey(tag, Object.entries(a))
+    const idx = seen.get(key) ?? 0
+    seen.set(key, idx + 1)
+    if (a['aria-label'] !== undefined || a['aria-labelledby'] !== undefined || (a.title ?? '').trim()) continue
+    const inner = m[3]
+    const alt = /<img\b[^>]*\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(inner)
+    const hasName = stripTags(inner) !== '' || ((alt?.[1] ?? alt?.[2] ?? alt?.[3] ?? '').trim() !== '') || /<svg\b[\s\S]*?<title\b[^>]*>\s*\S/i.test(inner)
+    if (hasName) continue
+    const name = tag === 'a' ? nameFromHref(a.href ?? '', url, publisher) : nameFromClass((a.class ?? '') + ' ' + (a.id ?? ''), lang)
+    if (name) emptyNames.set(key + '#' + idx, name)
+  }
+
+  const pageUrl = absolutize(canonical, url) || (origin + url.pathname)
+  const logo = absolutize(touchIcon, url) || absolutize(icon, url) || (origin + '/favicon.svg')
+  const ogImage = absolutize(sizedSrc, url) || absolutize(responsiveSrc, url) || (edgeBase + '/og/' + lang + '.jpg')
+  const contactPath = TRUST_PATHS[lang][1][0]
+  const mail = (lang === 'fr' ? 'redaction@' : 'redazione@') + apexHost(url.hostname)
+  const add: string[] = []
+  const meta = (key: string, attr: 'property' | 'name', value: string) => {
+    if (value && !head.metaNames.has(key)) add.push('<meta ' + attr + '="' + key + '" content="' + escAttr(value) + '">')
+  }
+  meta('og:title', 'property', head.title)
+  meta('og:description', 'property', description)
+  meta('og:url', 'property', pageUrl)
+  meta('og:type', 'property', url.pathname === '/' ? 'website' : 'article')
+  meta('og:image', 'property', ogImage)
+  meta('twitter:card', 'name', 'summary_large_image')
+  meta('twitter:title', 'name', head.title)
+  meta('twitter:description', 'name', description)
+  meta('twitter:image', 'name', ogImage)
+  // The preload names the src as the img writes it: the audit, like a browser
+  // resolving both, matches them as strings.
+  if (prioritySrc && !/^data:/i.test(prioritySrc) && !preloaded.has(prioritySrc)) {
+    let preload = '<link rel="preload" as="image" href="' + escAttr(prioritySrc) + '" fetchpriority="high"'
+    if (priorityAttrs && priorityAttrs.srcset) preload += ' imagesrcset="' + escAttr(priorityAttrs.srcset) + '"'
+    if (priorityAttrs && priorityAttrs.sizes) preload += ' imagesizes="' + escAttr(priorityAttrs.sizes) + '"'
+    add.push(preload + '>')
+  }
+  if (!hasLlms) add.push('<link rel="llms" href="/llms.txt">')
+  const skipLink = mainId && !hasSkip
+    ? '<a class="rp-skip" href="#' + escAttr(mainId) + '">' + (lang === 'fr' ? 'Aller au contenu' : 'Vai al contenuto') + '</a>'
+    : ''
+  if (skipLink) add.push('<style>' + SKIP_CSS + '</style>')
+  const trustFooter = hasTrust ? '' : trustFooterHtml(lang)
+  if (trustFooter) add.push('<style>' + TRUST_CSS + '</style>')
+
+  const bundle = sheets.length >= 2 ? sheets : []
+  const joined = bundle.join(',')
+  const bundleTag = bundle.length
+    ? '<link rel="stylesheet" href="/_css/' + fnv1a(joined).toString(16) + '.css?f=' + encodeURIComponent(joined).replace(/%2F/gi, '/').replace(/%2C/gi, ',') + '">'
+    : ''
+
+  return {
+    url, origin, lang, title: head.title, pageUrl, description, ogImage, logo, publisher, contactPath, mail,
+    prioritySrc, heroSrc, headExtra: add.join('\n'), skipLink, trustFooter, bundle, bundleTag, labelled, emptyNames,
+  }
+}
+
+// JSON-LD that is already on the page, completed, wherever a node sits: at
+// the top, in a @graph, or nested as an Article's publisher. Article kinds get
+// headline, image, description, dateModified, mainEntityOfPage, author and
+// publisher; Organization gets @id, name, url, logo and a contactPoint (the
+// contact page and its mailbox); WebSite gets @id, name, url and publisher;
+// Person gets an @id from its name. Only fields that are missing, only values
+// the page can vouch for (datePublished is never invented); anything that is
+// not valid JSON is returned as null and left exactly as it was.
+function fixJsonLd(raw: string, p: PagePlan): string | null {
+  let data: unknown
+  try { data = JSON.parse(raw) } catch { return null }
+  let changed = false
+  const orgId = p.origin + '/#organization'
+  const typesOf = (n: Record<string, unknown>): string[] => {
+    const t = n['@type']
+    return (Array.isArray(t) ? t : [t]).filter((x): x is string => typeof x === 'string').map((x) => x.toLowerCase())
+  }
+  const isOrg = (t: string[]) => t.some((x) => x === 'organization' || x.endsWith('organization') || x.endsWith('business') || x === 'corporation' || x === 'ngo' || x === 'onlinestore')
+  // Is there an Organization anywhere in the document? A reference to its @id
+  // is enough then; otherwise the first field that needs one carries it whole.
+  let hasOrg = false
+  const scan = (node: unknown): void => {
+    if (Array.isArray(node)) { for (const x of node) scan(x); return }
+    if (!node || typeof node !== 'object') return
+    const n = node as Record<string, unknown>
+    if (isOrg(typesOf(n))) hasOrg = true
+    for (const v of Object.values(n)) if (v && typeof v === 'object') scan(v)
+  }
+  scan(data)
+  const orgRef = (): Record<string, unknown> => {
+    if (hasOrg) return { '@id': orgId }
+    hasOrg = true
+    return {
+      '@type': 'Organization', '@id': orgId, name: p.publisher, url: p.origin + '/', logo: p.logo,
+      contactPoint: { '@type': 'ContactPoint', contactType: 'editorial office', email: p.mail, url: p.origin + p.contactPath },
+    }
+  }
+  const fill = (n: Record<string, unknown>, k: string, v: unknown) => {
+    if (v && (n[k] === undefined || n[k] === null || n[k] === '')) { n[k] = v; changed = true }
+  }
+  const slug = (s: string) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) { for (const x of node) visit(x); return }
+    if (!node || typeof node !== 'object') return
+    const n = node as Record<string, unknown>
+    const t = typesOf(n)
+    if (t.includes('article') || t.includes('newsarticle') || t.includes('blogposting')) {
+      fill(n, 'headline', p.title)
+      fill(n, 'image', p.ogImage)
+      fill(n, 'description', p.description)
+      fill(n, 'dateModified', n['datePublished'])
+      fill(n, 'mainEntityOfPage', p.pageUrl)
+      if (n['publisher'] === undefined || n['publisher'] === null || n['publisher'] === '') fill(n, 'publisher', orgRef())
+      if (n['author'] === undefined || n['author'] === null || n['author'] === '') fill(n, 'author', orgRef())
+    }
+    if (isOrg(t)) {
+      fill(n, '@id', orgId)
+      fill(n, 'name', p.publisher)
+      fill(n, 'url', p.origin + '/')
+      fill(n, 'logo', p.logo)
+      fill(n, 'contactPoint', { '@type': 'ContactPoint', contactType: 'editorial office', email: p.mail, url: p.origin + p.contactPath })
+    }
+    if (t.includes('website')) {
+      fill(n, '@id', p.origin + '/#website')
+      fill(n, 'name', p.publisher)
+      fill(n, 'url', p.origin + '/')
+      if (n['publisher'] === undefined || n['publisher'] === null || n['publisher'] === '') fill(n, 'publisher', orgRef())
+    }
+    if (t.includes('person') && typeof n['name'] === 'string' && slug(n['name'] as string)) {
+      fill(n, '@id', p.origin + '/#person-' + slug(n['name'] as string))
+    }
+    for (const [k, v] of Object.entries(n)) {
+      if (k !== '@type' && v && typeof v === 'object') visit(v)
+    }
+  }
+  visit(data)
+  if (!changed) return null
+  // A closing script tag inside a JSON string would end the element early;
+  // the escaped slash is the same string to a JSON parser.
+  return JSON.stringify(data).replace(/<\//g, '<\\/')
+}
+
+function applyPlan(p: PagePlan, response: Response): Response {
+  let priorityDone = !p.prioritySrc
+  let heroDone = !p.heroSrc
+  let imgCount = 0
+  let navCount = 0
+  let mainDone = false
+  let firstSheetDone = false
+  let styleBuf = ''
+  let ldBuf = ''
+  let inLd = false
+  const words = INPUT_WORDS[p.lang]
+  const rw = new HTMLRewriter()
+  rw.on('a[rel]', {
+    element(el) {
+      const before = relTokens(el.getAttribute('rel'))
+      const after = before.filter((t) => t !== 'nofollow' && t !== 'ugc')
+      if (after.length === before.length) return
+      if (after.length) el.setAttribute('rel', after.join(' '))
+      else el.removeAttribute('rel')
+    },
+  })
+  if (p.emptyNames.size) {
+    const seen = new Map<string, number>()
+    const nameIt = (el: Element) => {
+      const key = controlKey(el.tagName.toLowerCase(), el.attributes)
+      const idx = seen.get(key) ?? 0
+      seen.set(key, idx + 1)
+      if (el.hasAttribute('aria-label') || el.hasAttribute('aria-labelledby')) return
+      const name = p.emptyNames.get(key + '#' + idx)
+      if (name) el.setAttribute('aria-label', name)
+    }
+    rw.on('a[href]', { element: nameIt })
+    rw.on('button', { element: nameIt })
+  }
+  if (p.headExtra) {
+    rw.on('head', { element(el) { el.append('\n' + p.headExtra + '\n', { html: true }) } })
+  }
+  rw.on('meta', {
+    element(el) {
+      if ((el.getAttribute('name') ?? '').toLowerCase() !== 'description') return
+      const c = (el.getAttribute('content') ?? '').replace(/\s+/g, ' ').trim()
+      const t = trimDescription(c)
+      if (t !== c) el.setAttribute('content', t)
+    },
+  })
+  rw.on('script', {
+    element(el) {
+      inLd = (el.getAttribute('type') ?? '').trim().toLowerCase() === 'application/ld+json'
+      ldBuf = ''
+    },
+    text(t) {
+      if (!inLd) return
+      ldBuf += t.text
+      if (!t.lastInTextNode) { t.remove(); return }
+      const fixed = fixJsonLd(ldBuf, p)
+      t.replace(fixed === null ? ldBuf : fixed, { html: true })
+      inLd = false
+    },
+  })
+  rw.on('style', {
+    text(t) {
+      styleBuf += t.text
+      if (!t.lastInTextNode) { t.remove(); return }
+      t.replace(fixStyleBlock(styleBuf), { html: true })
+      styleBuf = ''
+    },
+  })
+  rw.on('[style]', {
+    element(el) {
+      const s = el.getAttribute('style') ?? ''
+      const fixed = fixStyleAttr(s, STYLE_TEXT_TAGS.has(el.tagName.toLowerCase()) ? 16 : 12)
+      if (fixed !== s) el.setAttribute('style', fixed)
+    },
+  })
+  rw.on('img', {
+    element(el) {
+      imgCount++
+      const src = (el.getAttribute('src') ?? '').trim()
+      const isPriority = !priorityDone && src === p.prioritySrc
+      const isHero = !heroDone && src === p.heroSrc
+      if (isPriority) priorityDone = true
+      if (isHero) heroDone = true
+      if (isPriority || isHero) {
+        el.setAttribute('fetchpriority', 'high')
+        if ((el.getAttribute('loading') ?? '').toLowerCase() === 'lazy') el.removeAttribute('loading')
+      } else if (imgCount > 1 && !el.hasAttribute('loading')) {
+        el.setAttribute('loading', 'lazy')
+      }
+      if (!el.hasAttribute('decoding')) el.setAttribute('decoding', 'async')
+      if (!el.hasAttribute('alt')) el.setAttribute('alt', '')
+    },
+  })
+  // An input, select or textarea the audit would count as unlabelled: no
+  // aria name, no title, no <label for> its id, not inside a <label>.
+  const labelIt = (el: Element) => {
+    const tag = el.tagName.toLowerCase()
+    const type = tag === 'input' ? (el.getAttribute('type') ?? 'text').trim().toLowerCase() : tag
+    if (type === 'hidden' || type === 'submit' || type === 'button' || type === 'reset' || type === 'image') return
+    if (el.hasAttribute('aria-label') || el.hasAttribute('aria-labelledby') || (el.getAttribute('title') ?? '').trim()) return
+    const id = (el.getAttribute('id') ?? '').trim(), name = (el.getAttribute('name') ?? '').trim()
+    if ((id && p.labelled.has('id:' + id)) || (name && p.labelled.has('name:' + name))) return
+    const label = (el.getAttribute('placeholder') ?? '').trim() || name || words[type] || (type.charAt(0).toUpperCase() + type.slice(1))
+    if (label) el.setAttribute('aria-label', label)
+  }
+  rw.on('input', { element: labelIt })
+  rw.on('select', { element: labelIt })
+  rw.on('textarea', { element: labelIt })
+  rw.on('nav', {
+    element(el) {
+      navCount++
+      if (el.hasAttribute('aria-label') || el.hasAttribute('aria-labelledby')) return
+      el.setAttribute('aria-label', (p.lang === 'fr' ? 'Navigation ' : 'Navigazione ') + navCount)
+    },
+  })
+  rw.on('main', {
+    element(el) {
+      if (mainDone) return
+      mainDone = true
+      if (!el.hasAttribute('id')) el.setAttribute('id', 'main')
+    },
+  })
+  if (p.bundle.length) {
+    rw.on('link', {
+      element(el) {
+        const a: Record<string, string> = {}
+        for (const k of ['rel', 'href', 'media', 'disabled', 'onload']) {
+          const v = el.getAttribute(k)
+          if (v !== null) a[k] = v
+        }
+        const path = bundleableSheet(a, p.url)
+        if (!path || !p.bundle.includes(path)) return
+        if (!firstSheetDone && path === p.bundle[0]) {
+          firstSheetDone = true
+          el.replace(p.bundleTag, { html: true })
+        } else {
+          el.remove()
+        }
+      },
+    })
+  }
+  if (p.skipLink || p.trustFooter) {
+    rw.on('body', {
+      element(el) {
+        if (p.skipLink) el.prepend(p.skipLink, { html: true })
+        if (p.trustFooter) el.append(p.trustFooter, { html: true })
+      },
+    })
+  }
+  return rw.transform(response)
+}
+
+// Every 200 HTML page goes through here, after the toplist is in and before
+// the mirror, robots and beacon injectors. Anything else is handed back as it
+// came: another status, another type, an empty body (HEAD), a body that is not
+// UTF-8 (a legacy page in Latin-1 would come out as mojibake), or a site that
+// switched the fixes off.
+async function fixPage(response: Response, request: Request, env: Env): Promise<Response> {
+  if (response.status !== 200 || fixPageOff(env)) return response
+  const ct = response.headers.get('Content-Type') ?? ''
+  if (!ct.includes('text/html')) return response
+  const buf = await response.arrayBuffer()
+  const headers = new Headers(response.headers)
+  headers.delete('Content-Length')
+  const again = (body: ArrayBuffer | string) => new Response(body, { status: response.status, statusText: response.statusText, headers })
+  if (buf.byteLength === 0) return again(buf)
+  let html: string
+  try { html = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(buf) } catch { return again(buf) }
+  let plan: PagePlan
+  try { plan = planPage(html, new URL(request.url), env) } catch { return again(html) }
+  return applyPlan(plan, again(html))
 }
 
 export default {
@@ -858,8 +1865,15 @@ export default {
       return handleLogoProxy(url, env, logoMatch)
     }
 
+    // The page's stylesheets as one response; see handleCssBundle. Only with
+    // the list this worker wrote into the page, so a real /_css/ file on a
+    // site still falls through to the assets.
+    if (url.pathname.indexOf('/_css/') === 0 && url.searchParams.has('f')) {
+      return handleCssBundle(url, env)
+    }
+
     try {
-      const assetResponse = await env.ASSETS.fetch(request)
+      let assetResponse = await env.ASSETS.fetch(request)
       // Nothing real lives here and it is a retired path: 410 Gone rather
       // than the site's 404 page. 410 gets the URL dropped from the index on
       // the next crawl; a 404 leaves Google re-checking it for months.
@@ -867,6 +1881,14 @@ export default {
       // 301, and a rescued redirect must not be turned into a tombstone.
       if (isRetiredPath && assetResponse.status === 404) {
         return handleRetiredPage(url, env)
+      }
+      // The trust pages, /llms.txt and /AGENTS.md are the worker's own where
+      // the site has no file of that name. Before NOT_FOUND_REDIRECT: the
+      // footer on every page links to them, and a link that 301s home is a
+      // link to nothing.
+      if (assetResponse.status === 404 && (request.method === 'GET' || request.method === 'HEAD')) {
+        const generated = await generatedPage(url, env)
+        if (generated) assetResponse = generated
       }
       // A page that no longer exists, on a site that asked for its old links
       // to keep counting: 301 to NOT_FOUND_REDIRECT. See notFoundRedirectTarget.
@@ -879,10 +1901,14 @@ export default {
           }))
         }
       }
-      const withToplist = await injectToplist(assetResponse, request, env)
+      const withCss = await fixCssResponse(assetResponse, env)
+      const withToplist = await injectToplist(withCss, request, env)
+      // The edge SEO fixes, after the toplist is in the page (its links and
+      // images are fixed too) and before the mirror, robots and beacon passes.
+      const withFixes = await fixPage(withToplist, request, env)
       const withMirror = (env.SUBDOMAIN_HOST && env.SUBDOMAIN_SLUG)
-        ? injectSubdomainMirrorMeta(withToplist, url, env)
-        : withToplist
+        ? injectSubdomainMirrorMeta(withFixes, url, env)
+        : withFixes
       const withRobots = injectRobotsMeta(withMirror, env)
       return withSecurityHeaders(injectBeacon(withRobots, url, env), request)
     } catch {
