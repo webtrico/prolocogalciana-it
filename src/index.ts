@@ -1712,6 +1712,9 @@ interface PagePlan {
   /** The first content image (not the logo), never lazy-loaded: in a browser
    *  it is the real LCP whatever the audit's candidate is. */
   heroSrc: string
+  /** The hero sits before the first H2: high in the viewport, so it shares
+   *  the high fetch priority; one further down does not. */
+  heroEarly: boolean
   headExtra: string
   skipLink: string
   trustFooter: string
@@ -1790,6 +1793,11 @@ function navPageLinks(visible: string, base: URL): Array<[string, string]> {
       const a = parseAttrs('<a' + m[1] + '>')
       const path = sameOriginPath(a.href ?? '', base)
       if (!path || path.indexOf('/vai/') === 0 || path.indexOf('/aller/') === 0 || path.indexOf('/go/') === 0 || NOT_FOUND_ASSET_RE.test(path)) continue
+      // A sponsored or nofollow link, one opening a new tab, or a trust page
+      // (about, contact) is not a reader's next page; a rescued path that
+      // redirects to a partner must not be fetched for nothing.
+      if (/\b(sponsored|nofollow|ugc)\b/i.test(a.rel ?? '') || (a.target ?? '').toLowerCase() === '_blank') continue
+      if (TRUST_PATHS.it.some((l) => l[0] === path) || TRUST_PATHS.fr.some((l) => l[0] === path)) continue
       const text = stripTags(m[2]) || decodeEntities(a['aria-label'] ?? a.title ?? '').trim()
       out.push([path, text])
     }
@@ -1872,7 +1880,7 @@ function planToc(visible: string, rewritten: string, lang: 'it' | 'fr'): { html:
 // says otherwise; CTA_CSS keeps it off every screen 760px and wider.
 function ctaHtml(lang: 'it' | 'fr', anchor: string): string {
   return '<a class="rp-cta" data-rf="sticky-cta" href="#' + escAttr(anchor) + '" hidden>' + CTA_WORDS[lang] + '</a>'
-    + '<script>(function(){try{var a=document.querySelector(".rp-cta"),m=document.getElementById("' + escAttr(anchor) + '"),f=document.querySelector("footer.rp-trust");if(!a||!m)return;var on=0;function u(){try{var h=document.documentElement.scrollHeight-innerHeight,p=h>0?(scrollY||0)/h:1,r=m.getBoundingClientRect(),v=r.bottom>0&&r.top<innerHeight,ft=f?f.getBoundingClientRect().top<innerHeight:false,s=p>=.4&&!v&&!ft;if(s!==on){on=s;if(s)a.removeAttribute("hidden");else a.setAttribute("hidden","")}}catch(e){}}addEventListener("scroll",u,{passive:true});addEventListener("resize",u,{passive:true});u()}catch(e){}})();</script>'
+    + '<script>(function(){try{var a=document.querySelector(".rp-cta"),m=document.getElementById(' + JSON.stringify(anchor).replace(/</g, '\\u003c') + '),f=document.querySelector("footer.rp-trust");if(!a||!m)return;var on=0;function u(){try{var h=document.documentElement.scrollHeight-innerHeight,p=h>0?(scrollY||0)/h:1,r=m.getBoundingClientRect(),v=r.bottom>0&&r.top<innerHeight,ft=f?f.getBoundingClientRect().top<innerHeight:false,s=p>=.4&&!v&&!ft;if(s!==on){on=s;if(s)a.removeAttribute("hidden");else a.setAttribute("hidden","")}}catch(e){}}addEventListener("scroll",u,{passive:true});addEventListener("resize",u,{passive:true});u()}catch(e){}})();</script>'
 }
 // Up to two pages from the main navigation for the browser to prefetch: the
 // first two internal links of the first <nav>, not this page, no duplicates.
@@ -2021,6 +2029,8 @@ function planPage(html: string, url: URL, env: Env, identity: SiteIdentity | nul
   if (!prioritySrc && headerSrc) { prioritySrc = headerSrc; priorityAttrs = headerAttrs }
   if (!prioritySrc && firstSrc) { prioritySrc = firstSrc; priorityAttrs = firstAttrs }
   if (heroSrc === prioritySrc) heroSrc = ''
+  const firstH2 = visible.search(/<h2\b/i)
+  const heroEarly = !!heroSrc && (firstH2 < 0 || visible.indexOf(heroSrc) < firstH2)
 
   const mainTag = /<main\b[^>]*>/i.exec(visible)?.[0] ?? ''
   const mainId = mainTag ? (parseAttrs(mainTag).id || 'main') : ''
@@ -2211,7 +2221,7 @@ function planPage(html: string, url: URL, env: Env, identity: SiteIdentity | nul
 
   return {
     url, origin, lang, title: head.title, pageUrl, description, ogImage, logo, publisher, contactPath, mail,
-    prioritySrc, heroSrc, headExtra: add.join('\n'), skipLink, trustFooter, bundle, bundleTag, labelled, emptyNames,
+    prioritySrc, heroSrc, heroEarly, headExtra: add.join('\n'), skipLink, trustFooter, bundle, bundleTag, labelled, emptyNames,
     titleNames, styleTag, captions, headless, searchPath: SEARCH_PATH[lang],
     identity, socials: pageSocials(visible), dims,
     toc: tocPlan?.html ?? '', tocIds: tocPlan?.ids ?? new Map(), cta, toplistId: mountTag && !parseAttrs(mountTag).id ? mountId : '',
@@ -2323,7 +2333,7 @@ function fixJsonLd(raw: string, p: PagePlan): string | null {
   if (!changed) return null
   // A closing script tag inside a JSON string would end the element early;
   // the escaped slash is the same string to a JSON parser.
-  return JSON.stringify(data).replace(/<\//g, '<\\/')
+  return JSON.stringify(data).replace(/<\//g, '<\\/').replace(/<!--/g, '<\!--').replace(/-->/g, '--\>')
 }
 
 function applyPlan(p: PagePlan, response: Response): Response {
@@ -2475,7 +2485,10 @@ function applyPlan(p: PagePlan, response: Response): Response {
       if (isPriority) priorityDone = true
       if (isHero) heroDone = true
       if (isPriority || isHero || imgCount <= 3) {
-        if (isPriority || isHero) el.setAttribute('fetchpriority', 'high')
+        // The audit's candidate, and the hero only when it is high on the
+        // page: a content image far down would share the bandwidth the real
+        // LCP needs.
+        if (isPriority || (isHero && p.heroEarly)) el.setAttribute('fetchpriority', 'high')
         if ((el.getAttribute('loading') ?? '').toLowerCase() === 'lazy') el.removeAttribute('loading')
       } else if (!el.hasAttribute('loading')) {
         el.setAttribute('loading', 'lazy')
@@ -2573,16 +2586,6 @@ function applyPlan(p: PagePlan, response: Response): Response {
       },
     })
   }
-  if (p.rgLine) {
-    let rgDone = false
-    rw.on('footer.rp-trust', {
-      element(el) {
-        if (rgDone) return
-        rgDone = true
-        el.append(p.rgLine, { html: true })
-      },
-    })
-  }
   if (p.skipLink || p.trustFooter || p.cta) {
     rw.on('body', {
       element(el) {
@@ -2611,7 +2614,10 @@ function robotsWithSignals(existing: string, origin: string): string {
   while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
   const star = lines.findIndex((l) => /^\s*user-agent:\s*\*\s*$/i.test(l))
   if (star >= 0) lines.splice(star + 1, 0, CONTENT_SIGNAL)
-  else lines.push(...(lines.length ? [''] : []), 'User-agent: *', CONTENT_SIGNAL, 'Allow: /', 'Disallow: /api/toplist/', 'Disallow: /go/', 'Disallow: /vai/', 'Disallow: /aller/')
+  // A file with only named groups keeps its meaning for every other crawler
+  // (unrestricted): the star group added carries the signal and the cloak
+  // paths, no Allow line that would read as a new policy.
+  else lines.push(...(lines.length ? [''] : []), 'User-agent: *', CONTENT_SIGNAL, ...(lines.length ? [] : ['Allow: /']), 'Disallow: /api/toplist/', 'Disallow: /go/', 'Disallow: /vai/', 'Disallow: /aller/')
   if (!lines.some((l) => /^\s*sitemap:/i.test(l))) lines.push('', 'Sitemap: ' + origin + '/sitemap.xml')
   return lines.join('\n') + '\n'
 }
@@ -2667,7 +2673,8 @@ async function handleNotFound(url: URL, env: Env, method: string): Promise<Respo
     + '<style>' + TRUST_PAGE_CSS + 'main{text-align:center;padding-top:4rem}.rp-code{font-size:4rem;font-weight:800;color:#9ca3af;line-height:1;margin:0}</style></head>'
     + '<body><main id="main"><p class="rp-home"><a href="/">' + name + '</a></p><p class="rp-code">404</p><h1>' + copy.head + '</h1><p>' + copy.body + '</p>'
     + '<p><a href="/">' + copy.home + '</a></p></main></body></html>'
-  const headers = new Headers({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=300', 'X-Robots-Tag': 'noindex, nofollow' })
+  // A minute at most: a page pushed seconds after a visitor's miss must not be a 404 for five.
+  const headers = new Headers({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=60', 'X-Robots-Tag': 'noindex, nofollow' })
   return withSecurityHeaders(new Response(method === 'HEAD' ? null : html, { status: 404, headers }))
 }
 
