@@ -1748,6 +1748,8 @@ interface PagePlan {
    *  and the id each H2 gets, by its index among the document's H2s. */
   toc: string
   tocIds: Map<number, string>
+  /** The page has a toplist mount: the box goes after it, not after the intro. */
+  tocAfterToplist: boolean
   /** The phone call-to-action bar and its script ('' = no toplist on the page),
    *  and the id the toplist mount gets when it has none. */
   cta: string
@@ -1759,7 +1761,7 @@ interface PagePlan {
 // rewriter in applyPlan, like the rest of the fixes. Each is deterministic
 // from the page alone: no fetch, no clock, no randomness, so two renders of
 // one page are one page.
-const TOC_CSS = '.rp-toc{margin:1rem 0;font-size:16px;line-height:1.5}.rp-toc summary{cursor:pointer;font-weight:600;min-height:24px;padding:.25rem 0}.rp-toc ol{margin:.5rem 0 0;padding-left:1.25rem}.rp-toc li{margin:.25rem 0}.rp-toc a{min-height:24px;display:inline-block}'
+const TOC_CSS = '.rp-toc{margin:1rem 0;font-size:16px;line-height:1.5;border:1px solid rgba(128,128,128,.25);border-radius:8px;padding:.25rem .9rem}.rp-toc summary{cursor:pointer;font-weight:600;min-height:24px;padding:.35rem 0}.rp-toc ol{margin:.25rem 0 .5rem;padding:0;list-style:none;columns:2;column-gap:1.5rem}.rp-toc li{margin:.15rem 0;break-inside:avoid}.rp-toc a{min-height:24px;display:inline-block;text-decoration:none}.rp-toc a:hover{text-decoration:underline}@media (max-width:759px){.rp-toc ol{columns:1}}'
 // Shown only on a phone, only once the script lifts the hidden attribute:
 // the desktop and tablet test of the same bar lost, and a bar that paints
 // before the reader has scrolled is an interstitial.
@@ -1769,6 +1771,9 @@ const CTA_WORDS: Record<'it' | 'fr', string> = { it: 'Vedi la classifica', fr: '
 const TOPLIST_ANCHOR: Record<'it' | 'fr', string> = { it: 'classifica', fr: 'classement' }
 const TOC_MIN_H2 = 6
 const TOC_MIN_WORDS = 1500
+/** Entries at most: a box of eighteen links is a wall, not a map. */
+const TOC_MAX_ENTRIES = 10
+const TOC_ENTRY_CHARS = 60
 
 // A fragment id from a heading's text: ASCII letters and digits, hyphens
 // between, accents dropped ("Metodi di pagamento" is "metodi-di-pagamento").
@@ -1859,18 +1864,20 @@ function planToc(visible: string, rewritten: string, lang: 'it' | 'fr'): { html:
     const at = m.index ?? 0
     if (at < start || at > end) continue
     const text = stripTags(m[2])
-    if (!text) continue
+    // A tiny heading ("Pro", "Contro") is a label inside a block, not a
+    // section a reader looks for.
+    if (!text || text.length < 7) continue
+    if (entries.length >= TOC_MAX_ENTRIES) break
     const own = parseAttrs('<h2' + m[1] + '>').id
     let id = own || slugId(text) || 'sezione-' + (idx + 1)
     if (!own) { let n = 2; const base = id; while (taken.has(id)) id = base + '-' + n++; taken.add(id); ids.set(idx, id) }
-    entries.push('<li><a href="#' + escAttr(id) + '">' + escAttr(text) + '</a></li>')
+    const label = text.length > TOC_ENTRY_CHARS ? text.slice(0, TOC_ENTRY_CHARS - 1).replace(/\s+\S*$/, '') + '…' : text
+    entries.push('<li><a href="#' + escAttr(id) + '">' + escAttr(label) + '</a></li>')
   }
   if (entries.length < TOC_MIN_H2) return null
   const word = TOC_WORDS[lang]
-  // Closed by default, so on a phone it is one line; opened on a wide screen
-  // by the one statement below (a details element cannot be opened from CSS).
+  // Closed by default on every screen: one line until the reader wants it.
   const html = '<nav class="rp-toc" aria-label="' + word + '"><details><summary>' + word + '</summary><ol>' + entries.join('') + '</ol></details></nav>'
-    + '<script>try{if(matchMedia("(min-width:760px)").matches)document.querySelector(".rp-toc details").open=true}catch(e){}</script>'
   return { html, ids }
 }
 // The phone bar: a link to the toplist's anchor, never to an operator, shown
@@ -2224,7 +2231,7 @@ function planPage(html: string, url: URL, env: Env, identity: SiteIdentity | nul
     prioritySrc, heroSrc, heroEarly, headExtra: add.join('\n'), skipLink, trustFooter, bundle, bundleTag, labelled, emptyNames,
     titleNames, styleTag, captions, headless, searchPath: SEARCH_PATH[lang],
     identity, socials: pageSocials(visible), dims,
-    toc: tocPlan?.html ?? '', tocIds: tocPlan?.ids ?? new Map(), cta, toplistId: mountTag && !parseAttrs(mountTag).id ? mountId : '',
+    toc: tocPlan?.html ?? '', tocIds: tocPlan?.ids ?? new Map(), tocAfterToplist: !!mountTag, cta, toplistId: mountTag && !parseAttrs(mountTag).id ? mountId : '',
   }
 }
 
@@ -2556,8 +2563,10 @@ function applyPlan(p: PagePlan, response: Response): Response {
   }
   // The edge pass. Each H2 the contents list names gets its id by its index
   // among every H2 the rewriter meets, which planToc made sure is the index
-  // the text pass counted. The contents box goes after the end tag of the
-  // first paragraph following the H1.
+  // the text pass counted. The contents box goes after the toplist mount
+  // when the page has one (the ranking is what the reader came for; the
+  // map of the rest comes under it), else after the end tag of the first
+  // paragraph following the H1.
   if (p.toc) {
     let h2Idx = -1, h1Seen = false, tocDone = false
     rw.on('h2', {
@@ -2568,13 +2577,23 @@ function applyPlan(p: PagePlan, response: Response): Response {
       },
     })
     rw.on('h1', { element() { h1Seen = true } })
-    rw.on('p', {
-      element(el) {
-        if (!h1Seen || tocDone) return
-        tocDone = true
-        el.after(p.toc, { html: true })
-      },
-    })
+    if (p.tocAfterToplist) {
+      rw.on('[data-toplist]', {
+        element(el) {
+          if (tocDone) return
+          tocDone = true
+          el.after(p.toc, { html: true })
+        },
+      })
+    } else {
+      rw.on('p', {
+        element(el) {
+          if (!h1Seen || tocDone) return
+          tocDone = true
+          el.after(p.toc, { html: true })
+        },
+      })
+    }
   }
   if (p.toplistId) {
     let mountDone = false
