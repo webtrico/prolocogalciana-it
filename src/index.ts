@@ -244,7 +244,7 @@ async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: Execut
   if (excluded) {
     ctx.waitUntil(fetch(admin + '/beacon', {
       method: 'POST', redirect: 'manual',
-      headers: { 'Content-Type': 'application/json', 'X-Beacon-Edge': '1' },
+      headers: { 'Content-Type': 'application/json', 'X-Beacon-Edge': '1', 'X-Beacon-Key': env.BEACON_KEY ?? '' },
       body: JSON.stringify({ domain: apexHost(url.hostname), excluded: excluded }),
     }).then(function () { return undefined }, function () { return undefined }))
     return ok
@@ -268,7 +268,7 @@ async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: Execut
     const sigPath = typeof hit.p === 'string' ? hit.p : ''
     ctx.waitUntil(fetch(admin + '/beacon', {
       method: 'POST', redirect: 'manual',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': request.headers.get('User-Agent') ?? '', 'X-Beacon-Edge': '1' },
+      headers: { 'Content-Type': 'application/json', 'User-Agent': request.headers.get('User-Agent') ?? '', 'X-Beacon-Edge': '1', 'X-Beacon-Key': env.BEACON_KEY ?? '' },
       body: JSON.stringify({
         domain: apexHost(url.hostname), k: 'x',
         path: sigPath.charAt(0) === '/' ? sigPath.split('?')[0].split('#')[0].slice(0, 200) : '',
@@ -285,7 +285,7 @@ async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: Execut
   if (hit && hit.x === 'wd') {
     ctx.waitUntil(fetch(admin + '/beacon', {
       method: 'POST', redirect: 'manual',
-      headers: { 'Content-Type': 'application/json', 'X-Beacon-Edge': '1' },
+      headers: { 'Content-Type': 'application/json', 'X-Beacon-Edge': '1', 'X-Beacon-Key': env.BEACON_KEY ?? '' },
       body: JSON.stringify({ domain: apexHost(url.hostname), excluded: 'webdriver' }),
     }).then(function () { return undefined }, function () { return undefined }))
     return ok
@@ -333,7 +333,7 @@ async function handleBeaconHit(request: Request, url: URL, env: Env, ctx: Execut
         // request, by isBotRequest above. The admin repeats the User-Agent half
         // of that check and skips the Cloudflare-signal half, which on THIS
         // request describes this worker in a datacentre rather than the person.
-        'X-Beacon-Edge': '1',
+        'X-Beacon-Edge': '1', 'X-Beacon-Key': env.BEACON_KEY ?? '',
       },
       body,
     })
@@ -748,6 +748,7 @@ interface Env {
   COUNTRY?: string
   TOPLIST_EDGE?: string
   TOPLIST_ADMIN?: string          // admin worker URL for organic beacon
+  BEACON_KEY?: string             // set on the worker by Raptor: proves a reported visit came from this site, not from a script
   TOPLIST_EXCLUDE_SLUGS?: string  // optional comma-separated slugs to omit
   SITEMAP_AUTO?: string           // "off" to disable the dynamic sitemap.xml route
   SISTER_SITE?: string            // optional "FR:foo.fr" → emits hreflang on /brand/:slug
@@ -756,7 +757,7 @@ interface Env {
   REDIRECT_HOSTS?: string         // optional comma-separated hosts that 301 to SUBDOMAIN_HOST
   ROBOTS_TAG?: string             // optional site-wide robots directive, replaces per-page tags
   NOT_FOUND_REDIRECT?: string     // optional: where a page that no longer exists goes, with a 301 (e.g. "/"); absent = 404
-  FIX_PAGE?: string               // optional: "off" switches the edge SEO fixes (fixPage, CSS floor) off for this site
+  FIX_PAGE?: string               // optional: "on" switches the edge page rewriting on for this site; off by default
 }
 
 // When SUBDOMAIN_HOST + SUBDOMAIN_SLUG are set, strip existing canonical/hreflang from HTML
@@ -1689,8 +1690,17 @@ function pageSocials(visible: string): string[] {
 }
 
 // ── The page pass ─────────────────────────────────────────────────────────
+// OFF unless a site asks for it (FIX_PAGE = "on"). It was on for every site,
+// and that was the mistake: the same trust footer, the same four generated
+// pages (about, contact, privacy, editorial policy), the same contents box,
+// the same call-to-action bar, the same /llms.txt and the same class names
+// on four hundred sites that are supposed to share nothing. One template
+// stamped on a whole network is the footprint the network exists to avoid,
+// and none of it was written for the site it appeared on. A site's pages are
+// served as their author made them; what improves a site is decided and
+// written for that site.
 function fixPageOff(env: { FIX_PAGE?: string }): boolean {
-  return (env.FIX_PAGE ?? '').trim().toLowerCase() === 'off'
+  return (env.FIX_PAGE ?? '').trim().toLowerCase() !== 'on'
 }
 
 interface PagePlan {
@@ -2804,7 +2814,7 @@ export default {
 
     // robots.txt with the Content Signals line, whatever the site's file
     // says; see handleRobots.
-    if (url.pathname === '/robots.txt' && (request.method === 'GET' || request.method === 'HEAD')) {
+    if (url.pathname === '/robots.txt' && (request.method === 'GET' || request.method === 'HEAD') && !fixPageOff(env)) {
       return handleRobots(request, url, env)
     }
 
@@ -2840,7 +2850,7 @@ export default {
       // the site has no file of that name. Before NOT_FOUND_REDIRECT: the
       // footer on every page links to them, and a link that 301s home is a
       // link to nothing.
-      if (assetResponse.status === 404 && (request.method === 'GET' || request.method === 'HEAD')) {
+      if (assetResponse.status === 404 && (request.method === 'GET' || request.method === 'HEAD') && !fixPageOff(env)) {
         const generated = await generatedPage(url, env)
         if (generated) assetResponse = generated
       }
@@ -2857,7 +2867,7 @@ export default {
         // Nothing behind a page address and no 404.html on the site: the
         // branded page, status 404. A site's own 404.html and a missing file
         // pass through as they are. See handleNotFound.
-        if (notFoundIsPage(url, request.method, assetResponse)) {
+        if (!fixPageOff(env) && notFoundIsPage(url, request.method, assetResponse)) {
           return handleNotFound(url, env, request.method)
         }
       }
